@@ -310,7 +310,7 @@ static int getsockopt(struct libos_handle* handle, int level, int optname, void*
 }
 
 static int send(struct libos_handle* handle, struct iovec* iov, size_t iov_len, size_t* out_size,
-                void* addr, size_t addrlen) {
+                void* addr, size_t addrlen, bool force_nonblocking) {
     __UNUSED(addr);
     __UNUSED(addrlen);
 
@@ -322,6 +322,17 @@ static int send(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
     PAL_HANDLE pal_handle = __atomic_load_n(&handle->info.sock.pal_handle, __ATOMIC_ACQUIRE);
     if (!pal_handle) {
         return -ENOTCONN;
+    }
+
+    if (force_nonblocking) {
+        lock(&handle->lock);
+        bool handle_is_nonblocking = handle->flags & O_NONBLOCK;
+        unlock(&handle->lock);
+        if (!handle_is_nonblocking) {
+            /* XXX: `PalStreamWrite` has no way of making one-time nonblocking write, so we have no
+             * other option but to fail. */
+            return -EINVAL;
+        }
     }
 
     void* buf;
@@ -349,7 +360,7 @@ static int send(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
         /* `size` is already correct. */
     }
 
-    int ret = PalStreamWrite(pal_handle, /*offset=*/0, &size, buf, NULL);
+    int ret = PalStreamWrite(pal_handle, /*offset=*/0, &size, buf);
     free(backing_buf);
     if (ret < 0) {
         return (ret == -PAL_ERROR_TOOLONG) ? -EMSGSIZE : pal_to_unix_errno(ret);
@@ -378,8 +389,8 @@ static int recv(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
         bool handle_is_nonblocking = handle->flags & O_NONBLOCK;
         unlock(&handle->lock);
         if (!handle_is_nonblocking) {
-            /* `PalStreamRead` has no way of making one-time nonblocking read, so we have no other
-             * option but to fail. */
+            /* XXX: `PalStreamRead` has no way of making one-time nonblocking read, so we have no
+             * other option but to fail. */
             return -EINVAL;
         }
     }
@@ -404,7 +415,7 @@ static int recv(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
         /* `size` is already correct. */
     }
 
-    int ret = PalStreamRead(pal_handle, /*offset=*/0, &size, buf, NULL, 0);
+    int ret = PalStreamRead(pal_handle, /*offset=*/0, &size, buf);
     if (ret < 0) {
         ret = pal_to_unix_errno(ret);
     } else {

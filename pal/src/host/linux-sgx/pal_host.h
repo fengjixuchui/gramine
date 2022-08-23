@@ -15,7 +15,6 @@
 #include <stddef.h>
 #include <stdint.h>
 
-#include "atomic.h"
 #include "enclave_tf_structs.h"
 #include "list.h"
 #include "spinlock.h"
@@ -26,15 +25,10 @@ void free_untrusted(void* mem);
 DEFINE_LIST(pal_handle_thread);
 struct pal_handle_thread {
     PAL_HDR reserved;
-    PAL_IDX tid;
     void* tcs;
     LIST_TYPE(pal_handle_thread) list;
     void* param;
 };
-
-typedef struct {
-    char str[PIPE_NAME_MAX];
-} PAL_PIPE_NAME;
 
 /* RPC streams are encrypted with 256-bit AES keys */
 typedef uint8_t PAL_SESSION_KEY[32];
@@ -57,7 +51,7 @@ typedef struct {
 
         struct {
             PAL_IDX fd;
-            const char* realpath;
+            char* realpath;
             size_t total;
             /* below fields are used only for trusted files */
             sgx_chunk_hash_t* chunk_hashes; /* array of hashes of file chunks */
@@ -67,7 +61,6 @@ typedef struct {
 
         struct {
             PAL_IDX fd;
-            PAL_PIPE_NAME name;
             bool nonblocking;
             bool is_server;
             PAL_SESSION_KEY session_key;
@@ -89,7 +82,7 @@ typedef struct {
 
         struct {
             PAL_IDX fd;
-            const char* realpath;
+            char* realpath;
             void* buf;
             void* ptr;
             void* end;

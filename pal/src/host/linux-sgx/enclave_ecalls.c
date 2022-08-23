@@ -13,7 +13,7 @@
 extern void* g_enclave_base;
 extern void* g_enclave_top;
 
-static struct atomic_int g_enclave_start_called = ATOMIC_INIT(0);
+static int64_t g_enclave_start_called = 0;
 
 /* returns 0 if rpc_queue is valid/not requested, otherwise -1 */
 static int verify_and_init_rpc_queue(rpc_queue_t* untrusted_rpc_queue) {
@@ -62,22 +62,22 @@ void handle_ecall(long ecall_index, void* ecall_args, void* exit_target, void* e
 
     if (!g_enclave_top) {
         g_enclave_base = enclave_base_addr;
-        g_enclave_top  = enclave_base_addr + GET_ENCLAVE_TLS(enclave_size);
+        g_enclave_top  = enclave_base_addr + GET_ENCLAVE_TCB(enclave_size);
     }
 
     /* disallow malicious URSP (that points into the enclave) */
-    void* ursp = (void*)GET_ENCLAVE_TLS(gpr)->ursp;
+    void* ursp = (void*)GET_ENCLAVE_TCB(gpr)->ursp;
     if (g_enclave_base <= ursp && ursp <= g_enclave_top)
         return;
 
-    SET_ENCLAVE_TLS(exit_target,     exit_target);
-    SET_ENCLAVE_TLS(ustack,          ursp);
-    SET_ENCLAVE_TLS(ustack_top,      ursp);
-    SET_ENCLAVE_TLS(clear_child_tid, NULL);
-    SET_ENCLAVE_TLS(untrusted_area_cache.in_use, 0UL);
+    SET_ENCLAVE_TCB(exit_target,     exit_target);
+    SET_ENCLAVE_TCB(ustack,          ursp);
+    SET_ENCLAVE_TCB(ustack_top,      ursp);
+    SET_ENCLAVE_TCB(clear_child_tid, NULL);
+    SET_ENCLAVE_TCB(untrusted_area_cache.in_use, 0UL);
 
     int64_t t = 0;
-    if (__atomic_compare_exchange_n(&g_enclave_start_called.counter, &t, 1, /*weak=*/false,
+    if (__atomic_compare_exchange_n(&g_enclave_start_called, &t, 1, /*weak=*/false,
                                     __ATOMIC_SEQ_CST, __ATOMIC_RELAXED)) {
         // ENCLAVE_START not yet called, so only valid ecall is ENCLAVE_START.
         if (ecall_index != ECALL_ENCLAVE_START) {

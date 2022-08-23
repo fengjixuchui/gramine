@@ -259,7 +259,7 @@ SGX terminology
       .. seealso::
 
          Orientation Guide
-            https://download.01.org/intel-sgx/dcap-1.0.1/docs/Intel_SGX_DCAP_ECDSA_Orientation.pdf
+            https://download.01.org/intel-sgx/sgx-dcap/1.14/linux/docs/DCAP_ECDSA_Orientation.pdf
 
          :term:`EPID`
             A |~| way to launch enclaves with Intel's infrastructure, intended
@@ -552,7 +552,11 @@ SGX terminology
    Security Version Number
    SVN
 
-      .. todo:: TBD
+      Each element of the SGX :term:`TCB` is assigned a Security Version Number
+      (SVN). For the hardware, these SVNs are referred to collectively as
+      CPU_SVN, and for software referred as ISV_SVN. A TCB is considered up to
+      date if all components of the TCB have SVNs greater than or equal to a
+      threshold published by the author of the component.
 
    Trusted Execution Environment
    TEE

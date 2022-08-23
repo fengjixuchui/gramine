@@ -71,21 +71,21 @@ bool sgx_is_completely_outside_enclave(const void* addr, size_t size) {
 
 #define UPDATE_USTACK(_ustack)                           \
     do {                                                 \
-        SET_ENCLAVE_TLS(ustack, _ustack);                \
-        GET_ENCLAVE_TLS(gpr)->ursp = (uint64_t)_ustack;  \
+        SET_ENCLAVE_TCB(ustack, _ustack);                \
+        GET_ENCLAVE_TCB(gpr)->ursp = (uint64_t)_ustack;  \
     } while(0)
 
 #else
 
-#define UPDATE_USTACK(_ustack) SET_ENCLAVE_TLS(ustack, _ustack)
+#define UPDATE_USTACK(_ustack) SET_ENCLAVE_TCB(ustack, _ustack)
 
 #endif
 
 void* sgx_prepare_ustack(void) {
-    void* old_ustack = GET_ENCLAVE_TLS(ustack);
+    void* old_ustack = GET_ENCLAVE_TCB(ustack);
 
     void* ustack = old_ustack;
-    if (ustack != GET_ENCLAVE_TLS(ustack_top))
+    if (ustack != GET_ENCLAVE_TCB(ustack_top))
         ustack -= RED_ZONE_SIZE;
     UPDATE_USTACK(ustack);
 
@@ -94,7 +94,7 @@ void* sgx_prepare_ustack(void) {
 
 void* sgx_alloc_on_ustack_aligned(size_t size, size_t alignment) {
     assert(IS_POWER_OF_2(alignment));
-    void* ustack = GET_ENCLAVE_TLS(ustack) - size;
+    void* ustack = GET_ENCLAVE_TCB(ustack) - size;
     ustack = ALIGN_DOWN_PTR_POW2(ustack, alignment);
     if (!sgx_is_completely_outside_enclave(ustack, size)) {
         return NULL;
@@ -119,7 +119,7 @@ void* sgx_copy_to_ustack(const void* ptr, size_t size) {
 }
 
 void sgx_reset_ustack(const void* old_ustack) {
-    assert(old_ustack <= GET_ENCLAVE_TLS(ustack_top));
+    assert(old_ustack <= GET_ENCLAVE_TCB(ustack_top));
     UPDATE_USTACK(old_ustack);
 }
 
@@ -230,7 +230,7 @@ int sgx_verify_report(sgx_report_t* report) {
     log_debug("Verify report:");
     print_report(report);
 
-    if (memcmp(&check_mac, &report->mac, sizeof(check_mac))) {
+    if (!ct_memequal(&check_mac, &report->mac, sizeof(check_mac))) {
         log_error("Report verification failed");
         return -PAL_ERROR_DENIED;
     }
@@ -341,21 +341,7 @@ int load_trusted_or_allowed_file(struct trusted_file* tf, PAL_HANDLE file, bool 
 
     if (create) {
         assert(tf->allowed);
-
-        char* uri = malloc(URI_MAX);
-        if (!uri)
-            return -PAL_ERROR_NOMEM;
-
-        ret = _PalStreamGetName(file, uri, URI_MAX);
-        if (ret < 0) {
-            free(uri);
-            return ret;
-        }
-
-        ret = register_file(uri, /*hash_str=*/NULL, /*check_duplicates=*/true);
-
-        free(uri);
-        return ret;
+        return register_file(tf->uri, /*hash_str=*/NULL, /*check_duplicates=*/true);
     }
 
     if (tf->allowed) {
@@ -953,7 +939,7 @@ int _PalStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* out_key,
     size_t secret_size;
     uint8_t secret[DH_SIZE];
 
-    assert(HANDLE_HDR(stream)->type == PAL_TYPE_PROCESS);
+    assert(stream->hdr.type == PAL_TYPE_PROCESS);
 
     /* perform unauthenticated DH key exchange to produce two collaterals: the session key K_e and
      * the assymetric SHA256 hashes over K_e (for later use in SGX report's reportdata) */
@@ -966,7 +952,7 @@ int _PalStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* out_key,
         goto out;
 
     for (int64_t bytes = 0, total = 0; total < (int64_t)sizeof(my_public); total += bytes) {
-        bytes = _PalStreamWrite(stream, 0, sizeof(my_public) - total, my_public + total, NULL, 0);
+        bytes = _PalStreamWrite(stream, 0, sizeof(my_public) - total, my_public + total);
         if (bytes < 0) {
             if (bytes == -PAL_ERROR_INTERRUPTED || bytes == -PAL_ERROR_TRYAGAIN) {
                 bytes = 0;
@@ -978,8 +964,7 @@ int _PalStreamKeyExchange(PAL_HANDLE stream, PAL_SESSION_KEY* out_key,
     }
 
     for (int64_t bytes = 0, total = 0; total < (int64_t)sizeof(peer_public); total += bytes) {
-        bytes = _PalStreamRead(stream, 0, sizeof(peer_public) - total, peer_public + total, NULL,
-                               0);
+        bytes = _PalStreamRead(stream, 0, sizeof(peer_public) - total, peer_public + total);
         if (bytes < 0) {
             if (bytes == -PAL_ERROR_INTERRUPTED || bytes == -PAL_ERROR_TRYAGAIN) {
                 bytes = 0;
@@ -1047,7 +1032,7 @@ int _PalStreamReportRequest(PAL_HANDLE stream, sgx_report_data_t* my_report_data
     uint64_t bytes;
     int64_t ret;
 
-    assert(HANDLE_HDR(stream)->type == PAL_TYPE_PROCESS);
+    assert(stream->hdr.type == PAL_TYPE_PROCESS);
 
     /* A -> B: targetinfo[A] */
     memset(&target_info, 0, sizeof(target_info));
@@ -1058,7 +1043,7 @@ int _PalStreamReportRequest(PAL_HANDLE stream, sgx_report_data_t* my_report_data
 
     for (bytes = 0, ret = 0; bytes < SGX_TARGETINFO_FILLED_SIZE; bytes += ret) {
         ret = _PalStreamWrite(stream, 0, SGX_TARGETINFO_FILLED_SIZE - bytes,
-                              ((void*)&target_info) + bytes, NULL, 0);
+                              ((void*)&target_info) + bytes);
         if (ret < 0) {
             if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
                 ret = 0;
@@ -1071,7 +1056,7 @@ int _PalStreamReportRequest(PAL_HANDLE stream, sgx_report_data_t* my_report_data
 
     /* B -> A: report[B -> A] */
     for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamRead(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes, NULL, 0);
+        ret = _PalStreamRead(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
         if (ret < 0) {
             if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
                 ret = 0;
@@ -1110,7 +1095,7 @@ int _PalStreamReportRequest(PAL_HANDLE stream, sgx_report_data_t* my_report_data
     }
 
     for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamWrite(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes, NULL, 0);
+        ret = _PalStreamWrite(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
         if (ret < 0) {
             if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
                 ret = 0;
@@ -1141,14 +1126,14 @@ int _PalStreamReportRespond(PAL_HANDLE stream, sgx_report_data_t* my_report_data
     uint64_t bytes;
     int64_t ret;
 
-    assert(HANDLE_HDR(stream)->type == PAL_TYPE_PROCESS);
+    assert(stream->hdr.type == PAL_TYPE_PROCESS);
 
     memset(&target_info, 0, sizeof(target_info));
 
     /* A -> B: targetinfo[A] */
     for (bytes = 0, ret = 0; bytes < SGX_TARGETINFO_FILLED_SIZE; bytes += ret) {
         ret = _PalStreamRead(stream, 0, SGX_TARGETINFO_FILLED_SIZE - bytes,
-                             ((void*)&target_info) + bytes, NULL, 0);
+                             ((void*)&target_info) + bytes);
         if (ret < 0) {
             if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
                 ret = 0;
@@ -1167,7 +1152,7 @@ int _PalStreamReportRespond(PAL_HANDLE stream, sgx_report_data_t* my_report_data
     }
 
     for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamWrite(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes, NULL, 0);
+        ret = _PalStreamWrite(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
         if (ret < 0) {
             if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
                 ret = 0;
@@ -1180,7 +1165,7 @@ int _PalStreamReportRespond(PAL_HANDLE stream, sgx_report_data_t* my_report_data
 
     /* A -> B: report[A -> B] */
     for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamRead(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes, NULL, 0);
+        ret = _PalStreamRead(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
         if (ret < 0) {
             if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
                 ret = 0;
@@ -1219,9 +1204,9 @@ int _PalStreamSecureInit(PAL_HANDLE stream, bool is_server, PAL_SESSION_KEY* ses
                          size_t buf_size) {
     int stream_fd;
 
-    if (HANDLE_HDR(stream)->type == PAL_TYPE_PROCESS)
+    if (stream->hdr.type == PAL_TYPE_PROCESS)
         stream_fd = stream->process.stream;
-    else if (HANDLE_HDR(stream)->type == PAL_TYPE_PIPE || HANDLE_HDR(stream)->type == PAL_TYPE_PIPECLI)
+    else if (stream->hdr.type == PAL_TYPE_PIPE || stream->hdr.type == PAL_TYPE_PIPECLI)
         stream_fd = stream->pipe.fd;
     else
         return -PAL_ERROR_BADHANDLE;

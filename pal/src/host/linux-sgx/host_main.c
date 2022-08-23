@@ -13,7 +13,7 @@
 #include "asan.h"
 #include "debug_map.h"
 #include "gdb_integration/sgx_gdb.h"
-#include "host_enclave.h"
+#include "host_ecalls.h"
 #include "host_internal.h"
 #include "host_log.h"
 #include "linux_utils.h"
@@ -22,7 +22,7 @@
 #include "pal_linux_error.h"
 #include "pal_rpc_queue.h"
 #include "pal_rtld.h"
-#include "pal_tls.h"
+#include "pal_tcb.h"
 #include "toml.h"
 #include "toml_utils.h"
 #include "topo_info.h"
@@ -208,6 +208,8 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
     char* token_path = NULL;
     int sigfile_fd = -1, token_fd = -1;
     int enclave_mem = -1;
+    size_t areas_size = 0;
+    struct mem_area* areas = NULL;
 
     /* this array may overflow the stack, so we allocate it in BSS */
     static void* tcs_addrs[MAX_DBG_THREADS];
@@ -334,8 +336,16 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
      * + enclave->thread_num for normal stack
      * + enclave->thread_num for signal stack
      */
-    int max_area_cnt = 10 + enclave->thread_num * 2;
-    struct mem_area* areas = __alloca(sizeof(areas[0]) * max_area_cnt);
+    areas_size = ALIGN_UP_POW2(sizeof(*areas) * (10 + enclave->thread_num * 2), PRESET_PAGESIZE);
+    areas = (struct mem_area*)DO_SYSCALL(mmap, NULL, areas_size, PROT_READ | PROT_WRITE,
+                                         MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    if (IS_PTR_ERR(areas)) {
+        log_error("Allocating memory failed (%ld)", PTR_TO_ERR(areas));
+        areas = NULL;
+        ret = -ENOMEM;
+        goto out;
+    }
+
     int area_num = 0;
 
     /* The manifest needs to be allocated at the upper end of the enclave
@@ -468,7 +478,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
 
         if (areas[i].data_src == TLS) {
             for (uint32_t t = 0; t < enclave->thread_num; t++) {
-                struct enclave_tls* gs = data + g_page_size * t;
+                struct pal_enclave_tcb* gs = data + g_page_size * t;
                 memset(gs, 0, g_page_size);
                 assert(sizeof(*gs) <= g_page_size);
                 gs->common.self = (PAL_TCB*)(tls_area->addr + g_page_size * t);
@@ -608,6 +618,8 @@ out:
         DO_SYSCALL(close, sigfile_fd);
     if (token_fd >= 0)
         DO_SYSCALL(close, token_fd);
+    if (areas)
+        DO_SYSCALL(munmap, areas, areas_size);
     free(sig_path);
     free(token_path);
     return ret;
@@ -661,13 +673,7 @@ static int parse_loader_config(char* manifest, struct pal_enclave* enclave_info)
         goto out;
     }
 
-    enclave_info->thread_num = thread_num_int64;
-
-    if (!enclave_info->thread_num) {
-        log_warning("Number of enclave threads ('sgx.thread_num') is not specified; assumed "
-                    "to be 1");
-        enclave_info->thread_num = 1;
-    }
+    enclave_info->thread_num = thread_num_int64 ?: 1;
 
     if (enclave_info->thread_num > MAX_DBG_THREADS) {
         log_error("Too large 'sgx.thread_num', maximum allowed is %d", MAX_DBG_THREADS);
@@ -969,8 +975,8 @@ static int load_enclave(struct pal_enclave* enclave, char* args, size_t args_siz
         return -ENOMEM;
 
     /* initialize TCB at the top of the alternative stack */
-    PAL_TCB_HOST* tcb = alt_stack + ALT_STACK_SIZE - sizeof(PAL_TCB_HOST);
-    pal_tcb_host_init(tcb, /*stack=*/NULL,
+    PAL_HOST_TCB* tcb = alt_stack + ALT_STACK_SIZE - sizeof(PAL_HOST_TCB);
+    pal_host_tcb_init(tcb, /*stack=*/NULL,
                       alt_stack); /* main thread uses the stack provided by Linux */
     ret = pal_thread_init(tcb);
     if (ret < 0)
@@ -1012,7 +1018,7 @@ noreturn static void print_usage_and_exit(const char* argv_0) {
                "\tFirst process: %s <path to libpal.so> init <application> args...\n"
                "\tChildren:      %s <path to libpal.so> child <parent_stream_fd> args...",
                self, self);
-    log_always("This is an internal interface. Use pal_loader to launch applications in "
+    log_always("This is an internal interface. Use gramine-sgx wrapper to launch applications in "
                "Gramine.");
     DO_SYSCALL(exit_group, 1);
     die_or_inf_loop();

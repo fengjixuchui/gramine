@@ -13,6 +13,7 @@
 #include "api.h"
 #include "asan.h"
 #include "enclave_tf.h"
+#include "linux_utils.h"
 #include "pal.h"
 #include "pal_error.h"
 #include "pal_flags_conv.h"
@@ -59,7 +60,7 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri,
     }
 
     /* create file PAL handle with path string placed at the end of this handle object */
-    hdl = calloc(1, HANDLE_SIZE(file) + normpath_size);
+    hdl = calloc(1, HANDLE_SIZE(file));
     if (!hdl) {
         free(normpath);
         return -PAL_ERROR_NOMEM;
@@ -68,13 +69,9 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri,
     init_handle_hdr(hdl, PAL_TYPE_FILE);
     hdl->flags |= PAL_HANDLE_FD_READABLE | PAL_HANDLE_FD_WRITABLE;
 
-    memcpy((char*)hdl + HANDLE_SIZE(file), normpath, normpath_size);
-    hdl->file.realpath = (const char*)hdl + HANDLE_SIZE(file);
+    hdl->file.realpath = normpath;
 
-    free(normpath); /* was copied into the file PAL handle object, not needed anymore */
-    normpath = NULL;
-
-    struct trusted_file* tf   = NULL;
+    struct trusted_file* tf = NULL;
 
     if (!(pal_options & PAL_OPTION_PASSTHROUGH)) {
         tf = get_trusted_or_allowed_file(hdl->file.realpath);
@@ -158,6 +155,8 @@ fail:
     if (fd >= 0)
         ocall_close(fd);
 
+    free(hdl->file.realpath);
+
     free(hdl);
     return ret;
 }
@@ -232,9 +231,7 @@ static int file_close(PAL_HANDLE handle) {
 
     ocall_close(fd);
 
-    /* initial realpath is part of handle object and will be freed with it */
-    if (handle->file.realpath && handle->file.realpath != (void*)handle + HANDLE_SIZE(file))
-        free((void*)handle->file.realpath);
+    free(handle->file.realpath);
 
     return 0;
 }
@@ -379,29 +376,6 @@ static int file_flush(PAL_HANDLE handle) {
     return 0;
 }
 
-static inline int file_stat_type(struct stat* stat) {
-    if (S_ISREG(stat->st_mode))
-        return PAL_TYPE_FILE;
-    if (S_ISDIR(stat->st_mode))
-        return PAL_TYPE_DIR;
-    if (S_ISCHR(stat->st_mode))
-        return PAL_TYPE_DEV;
-    if (S_ISFIFO(stat->st_mode))
-        return PAL_TYPE_PIPE;
-    if (S_ISSOCK(stat->st_mode))
-        return PAL_TYPE_DEV;
-
-    return 0;
-}
-
-/* copy attr content from POSIX stat struct to PAL_STREAM_ATTR */
-static inline void file_attrcopy(PAL_STREAM_ATTR* attr, struct stat* stat) {
-    attr->handle_type  = file_stat_type(stat);
-    attr->nonblocking  = false;
-    attr->share_flags  = stat->st_mode & PAL_SHARE_MASK;
-    attr->pending_size = stat->st_size;
-}
-
 /* 'attrquery' operation for file streams */
 static int file_attrquery(const char* type, const char* uri, PAL_STREAM_ATTR* attr) {
     if (strcmp(type, URI_TYPE_FILE) && strcmp(type, URI_TYPE_DIR))
@@ -482,36 +456,12 @@ static int file_rename(PAL_HANDLE handle, const char* type, const char* uri) {
         return unix_to_pal_error(ret);
     }
 
-    /* initial realpath is part of handle object and will be freed with it */
-    if (handle->file.realpath && handle->file.realpath != (void*)handle + HANDLE_SIZE(file)) {
-        free((void*)handle->file.realpath);
-    }
-
+    free(handle->file.realpath);
     handle->file.realpath = tmp;
     return 0;
 }
 
-static int file_getname(PAL_HANDLE handle, char* buffer, size_t count) {
-    if (!handle->file.realpath)
-        return 0;
-
-    size_t len = strlen(handle->file.realpath);
-    char* tmp = strcpy_static(buffer, URI_PREFIX_FILE, count);
-
-    if (!tmp || buffer + count < tmp + len + 1)
-        return -PAL_ERROR_TOOLONG;
-
-    memcpy(tmp, handle->file.realpath, len + 1);
-    return tmp + len - buffer;
-}
-
-static const char* file_getrealpath(PAL_HANDLE handle) {
-    return handle->file.realpath;
-}
-
 struct handle_ops g_file_ops = {
-    .getname        = &file_getname,
-    .getrealpath    = &file_getrealpath,
     .open           = &file_open,
     .read           = &file_read,
     .write          = &file_write,
@@ -553,17 +503,24 @@ static int dir_open(PAL_HANDLE* handle, const char* type, const char* uri, enum 
     if (fd < 0)
         return unix_to_pal_error(fd);
 
-    size_t len = strlen(uri);
-    PAL_HANDLE hdl = calloc(1, HANDLE_SIZE(dir) + len + 1);
+    PAL_HANDLE hdl = calloc(1, HANDLE_SIZE(dir));
     if (!hdl) {
         ocall_close(fd);
         return -PAL_ERROR_NOMEM;
     }
+
     init_handle_hdr(hdl, PAL_TYPE_DIR);
+
     hdl->flags |= PAL_HANDLE_FD_READABLE;
     hdl->dir.fd = fd;
-    char* path  = (void*)hdl + HANDLE_SIZE(dir);
-    memcpy(path, uri, len + 1);
+
+    char* path = strdup(uri);
+    if (!path) {
+        ocall_close(fd);
+        free(hdl);
+        return -PAL_ERROR_NOMEM;
+    }
+
     hdl->dir.realpath    = path;
     hdl->dir.buf         = NULL;
     hdl->dir.ptr         = NULL;
@@ -574,9 +531,6 @@ static int dir_open(PAL_HANDLE* handle, const char* type, const char* uri, enum 
 }
 
 #define DIRBUF_SIZE 1024
-static inline bool is_dot_or_dotdot(const char* name) {
-    return (name[0] == '.' && !name[1]) || (name[0] == '.' && name[1] == '.' && !name[2]);
-}
 
 /* 'read' operation for directory stream. Directory stream will not
    need a 'write' operation. */
@@ -668,9 +622,7 @@ static int dir_close(PAL_HANDLE handle) {
         handle->dir.buf = handle->dir.ptr = handle->dir.end = NULL;
     }
 
-    /* initial realpath is part of handle object and will be freed with it */
-    if (handle->dir.realpath && handle->dir.realpath != (void*)handle + HANDLE_SIZE(dir))
-        free((void*)handle->dir.realpath);
+    free(handle->dir.realpath);
 
     return 0;
 }
@@ -680,11 +632,8 @@ static int dir_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
     if (delete_mode != PAL_DELETE_ALL)
         return -PAL_ERROR_INVAL;
 
-    int ret = dir_close(handle);
-    if (ret < 0)
-        return ret;
+    int ret = ocall_delete(handle->dir.realpath);
 
-    ret = ocall_delete(handle->dir.realpath);
     return ret < 0 ? unix_to_pal_error(ret) : ret;
 }
 
@@ -702,39 +651,12 @@ static int dir_rename(PAL_HANDLE handle, const char* type, const char* uri) {
         return unix_to_pal_error(ret);
     }
 
-    /* initial realpath is part of handle object and will be freed with it */
-    if (handle->dir.realpath && handle->dir.realpath != (void*)handle + HANDLE_SIZE(dir)) {
-        free((void*)handle->dir.realpath);
-    }
-
+    free(handle->dir.realpath);
     handle->dir.realpath = tmp;
     return 0;
 }
 
-static int dir_getname(PAL_HANDLE handle, char* buffer, size_t count) {
-    if (!handle->dir.realpath)
-        return 0;
-
-    size_t len = strlen(handle->dir.realpath);
-    char* tmp  = strcpy_static(buffer, URI_PREFIX_DIR, count);
-
-    if (!tmp || buffer + count < tmp + len + 1)
-        return -PAL_ERROR_TOOLONG;
-
-    memcpy(tmp, handle->dir.realpath, len + 1);
-    return tmp + len - buffer;
-
-    if (len + 6 >= count)
-        return -PAL_ERROR_TOOLONG;
-}
-
-static const char* dir_getrealpath(PAL_HANDLE handle) {
-    return handle->dir.realpath;
-}
-
 struct handle_ops g_dir_ops = {
-    .getname        = &dir_getname,
-    .getrealpath    = &dir_getrealpath,
     .open           = &dir_open,
     .read           = &dir_read,
     .close          = &dir_close,

@@ -247,7 +247,7 @@ static int mount_one_nonroot(toml_table_t* mount, const char* prefix) {
     if (mount_path[0] != '/') {
         /* FIXME: Relative paths are deprecated starting from Gramine v1.2, we can disallow them
          * completely two versions after it. */
-        if (!strcmp(mount_path, ".") || !strcmp(mount_path, "..")) {
+        if (is_dot_or_dotdot(mount_path)) {
             log_error("Mount points '.' and '..' are not allowed, use absolute paths instead.");
             ret = -EINVAL;
             goto out;
@@ -817,12 +817,12 @@ out:
  */
 void get_mount(struct libos_mount* mount) {
     __UNUSED(mount);
-    // REF_INC(mount->ref_count);
+    // refcount_inc(&mount->ref_count);
 }
 
 void put_mount(struct libos_mount* mount) {
     __UNUSED(mount);
-    // REF_DEC(mount->ref_count);
+    // refcount_dec(&mount->ref_count);
 }
 
 int walk_mounts(int (*walk)(struct libos_mount* mount, void* arg), void* arg) {
@@ -958,7 +958,7 @@ BEGIN_CP_FUNC(mount) {
         new_mount->mount_point = NULL;
         new_mount->root        = NULL;
         INIT_LIST_HEAD(new_mount, list);
-        REF_SET(new_mount->ref_count, 0);
+        refcount_set(&new_mount->ref_count, 0);
 
         DO_CP_MEMBER(str, mount, new_mount, path);
 

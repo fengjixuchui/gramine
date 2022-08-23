@@ -267,7 +267,7 @@ this RA-TLS certificate is tied to the enclavized application that generated it.
 RA-TLS is shipped as three libraries: ``ra_tls_attest.so``, EPID based
 ``ra_tls_verify_epid.so`` and DCAP/ECDSA based ``ra_tls_verify_dcap.so``.
 The interfaces exposed by these libraries can be found in the following header:
-:file:`pal/src/host/linux-sgx/tools/ra-tls/ra_tls.h`.
+:file:`tools/sgx/ra-tls/ra_tls.h`.
 
 The examples of using RA-TLS can be found under ``CI-Examples/ra-tls-mbedtls``.
 
@@ -317,8 +317,8 @@ SGX measurements:
   ``MRENCLAVE``. This is a hex string.
 - ``RA_TLS_ISV_PROD_ID`` -- verify that the attesting enclave has this
   ``ISV_PROD_ID``. This is a decimal string.
-- ``RA_TLS_ISV_SVN`` -- verify that the attesting enclave has this ``ISV_SVN``.
-  This is a decimal string.
+- ``RA_TLS_ISV_SVN`` -- verify that the attesting enclave has this or higher
+  ``ISV_SVN``. This is a decimal string.
 
 For each of these settings, you may specify the special value ``any`` to skip
 verifying a particular measurement. This used to be the default, which would

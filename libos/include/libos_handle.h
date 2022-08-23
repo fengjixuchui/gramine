@@ -13,11 +13,11 @@
 #include <stdbool.h>
 #include <stdint.h>
 
-#include "atomic.h"  // TODO: migrate to stdatomic.h
 #include "libos_defs.h"
 #include "libos_fs_mem.h"
 #include "libos_lock.h"
 #include "libos_pollable_event.h"
+#include "libos_refcount.h"
 #include "libos_sync.h"
 #include "libos_types.h"
 #include "linux_socket.h"
@@ -147,7 +147,7 @@ struct libos_handle {
     enum libos_handle_type type;
     bool is_dir;
 
-    REFTYPE ref_count;
+    refcount_t ref_count;
 
     struct libos_fs* fs;
     struct libos_dentry* dentry;
@@ -236,7 +236,7 @@ struct libos_handle_map {
     uint32_t fd_top;
 
     /* refrence count and lock */
-    REFTYPE ref_count;
+    refcount_t ref_count;
     struct libos_lock lock;
 
     /* An array of file descriptor belong to this mapping */
@@ -268,6 +268,7 @@ int set_new_fd_handle_above_fd(uint32_t fd, struct libos_handle* hdl, int fd_fla
 struct libos_handle* __detach_fd_handle(struct libos_fd_handle* fd, int* flags,
                                         struct libos_handle_map* map);
 struct libos_handle* detach_fd_handle(uint32_t fd, int* flags, struct libos_handle_map* map);
+void detach_all_fds(void);
 
 /* manage handle mapping */
 int dup_handle_map(struct libos_handle_map** new_map, struct libos_handle_map* old_map);
@@ -277,7 +278,8 @@ int walk_handle_map(int (*callback)(struct libos_fd_handle*, struct libos_handle
                     struct libos_handle_map* map);
 
 int init_handle(void);
-int init_important_handles(void);
+int init_std_handles(void);
+int init_exec_handle(const char* const* argv, char*** out_new_argv);
 
 int open_executable(struct libos_handle* hdl, const char* path);
 

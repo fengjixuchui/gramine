@@ -12,6 +12,13 @@ from graminelibos.regression import (
     RegressionTestCase,
 )
 
+CPUINFO_TEST_FLAGS = [
+    'fpu', 'msr', 'apic', 'xsave', 'xsaveopt', 'avx', 'sse', 'sse2',
+    'avx512cd', 'sgx_lc', 'amx_tile', 'avx_vnni', 'mwaitx', 'rdtscp',
+    'syscall',
+]
+
+
 class TC_00_Unittests(RegressionTestCase):
     def test_000_spinlock(self):
         stdout, _ = self.run_binary(['spinlock'], timeout=20)
@@ -214,13 +221,23 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('execve(invalid-argv) correctly returned error', stdout)
         self.assertIn('execve(invalid-envp) correctly returned error', stdout)
 
-    @unittest.skipIf(USES_MUSL, 'Test uses /bin/sh from the host which is built against Glibc')
+    @unittest.skipIf(USES_MUSL,
+        'Test uses /bin/sh from the host which is usually built against glibc')
     def test_211_exec_script(self):
         stdout, _ = self.run_binary(['exec_script'])
         self.assertIn('Printing Args: '
             'scripts/baz.sh ECHO FOXTROT GOLF scripts/bar.sh '
             'ALPHA BRAVO CHARLIE DELTA '
             'scripts/foo.sh STRING FROM EXECVE', stdout)
+
+    @unittest.skipIf(USES_MUSL,
+        'Test uses /bin/sh from the host which is usually built against glibc')
+    def test_212_shebang_test_script(self):
+        stdout, _ = self.run_binary(['shebang_test_script'])
+        self.assertRegex(stdout, r'Printing Args: '
+            r'scripts/baz\.sh ECHO FOXTROT GOLF scripts/bar\.sh '
+            r'ALPHA BRAVO CHARLIE DELTA '
+            r'/?scripts/foo\.sh')
 
     def test_220_send_handle(self):
         path = 'tmp/send_handle_test'
@@ -371,6 +388,18 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('Host:', log)
         self.assertIn('LibOS initialized', log)
         self.assertIn('--- exit_group', log)
+
+    def test_702_debug_log_inline_unexpected_arg(self):
+        try:
+            # `debug_log_inline` program logic is irrelevant here, we only want to test Gramine's
+            # handling of unexpected args when the manifest has no explicit argv handling options
+            self.run_binary(['debug_log_inline', 'unexpected arg'])
+            self.fail('expected to return nonzero')
+        except subprocess.CalledProcessError as e:
+            self.assertEqual(e.returncode, 1)
+            stderr = e.stderr.decode()
+            self.assertIn('argv handling wasn\'t configured in the manifest, but cmdline arguments '
+                          'were specified', stderr)
 
 
 class TC_02_OpenMP(RegressionTestCase):
@@ -905,6 +934,8 @@ class TC_40_FileSystem(RegressionTestCase):
         self.assertIn('/proc/2/exe: link: /proc_common', lines)
         self.assertIn('/proc/2/root: link: /', lines)
         self.assertIn('/proc/2/maps: file', lines)
+        self.assertIn('/proc/2/cmdline: file', lines)
+        self.assertIn('/proc/2/status: file', lines)
 
         # /proc/[pid]/fd
         self.assertIn('/proc/2/fd/0: link: /dev/tty', lines)
@@ -959,7 +990,17 @@ class TC_40_FileSystem(RegressionTestCase):
         self.assertIn('TEST OK', stdout)
 
     def test_020_cpuinfo(self):
-        stdout, _ = self.run_binary(['proc_cpuinfo'])
+        with open('/proc/cpuinfo') as file_:
+            cpuinfo = file_.read().strip().split('\n\n')[-1]
+        cpuinfo = dict(map(str.strip, line.split(':'))
+            for line in cpuinfo.split('\n'))
+        if 'flags' in cpuinfo:
+            cpuinfo['flags'] = ' '.join(flag for flag in cpuinfo['flags'].split()
+                if flag in CPUINFO_TEST_FLAGS)
+        else:
+            cpuinfo['flags'] = ''
+
+        stdout, _ = self.run_binary(['proc_cpuinfo', cpuinfo['flags']])
 
         # proc/cpuinfo Linux-based formatting
         self.assertIn('cpuinfo test passed', stdout)
@@ -1245,13 +1286,8 @@ class TC_80_Socket(RegressionTestCase):
         self.assertIn('TEST OK', stdout)
 
     def test_300_socket_tcp_msg_peek(self):
-        stdout, _ = self.run_binary(['tcp_msg_peek'], timeout=50)
-        self.assertIn('[client] receiving with MSG_PEEK: Hello from server!', stdout)
-        self.assertIn('[client] receiving with MSG_PEEK again: Hello from server!', stdout)
-        self.assertIn('[client] receiving without MSG_PEEK: Hello from server!', stdout)
-        self.assertIn('[client] checking how many bytes are left unread: 0', stdout)
-        self.assertIn('[client] done', stdout)
-        self.assertIn('[server] done', stdout)
+        stdout, _ = self.run_binary(['tcp_msg_peek'])
+        self.assertIn('TEST OK', stdout)
 
     def test_310_socket_tcp_ipv6_v6only(self):
         stdout, _ = self.run_binary(['tcp_ipv6_v6only'], timeout=50)

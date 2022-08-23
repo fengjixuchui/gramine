@@ -31,8 +31,6 @@ static MEM_MGR handle_mgr = NULL;
 
 #define INIT_HANDLE_MAP_SIZE 32
 
-//#define DEBUG_REF
-
 static int init_tty_handle(struct libos_handle* hdl, bool write) {
     int flags = write ? (O_WRONLY | O_APPEND) : O_RDONLY;
     return open_namei(hdl, /*start=*/NULL, "/dev/tty", flags, LOOKUP_FOLLOW, /*found=*/NULL);
@@ -71,12 +69,13 @@ out:
     return ret;
 }
 
-static int init_exec_handle(void) {
+int init_exec_handle(const char* const* argv, char*** out_new_argv) {
     lock(&g_process.fs_lock);
     if (g_process.exec) {
         /* `g_process.exec` handle is already initialized if we did execve. See
          * `libos_syscall_execve_rtld`. */
         unlock(&g_process.fs_lock);
+        *out_new_argv = NULL;
         return 0;
     }
     unlock(&g_process.fs_lock);
@@ -84,7 +83,7 @@ static int init_exec_handle(void) {
     /* Initialize `g_process.exec` based on `libos.entrypoint` manifest key. */
     char* entrypoint = NULL;
     const char* exec_path;
-    struct libos_handle* hdl = NULL;
+    struct libos_handle* exec_handle = NULL;
     int ret;
 
     /* Initialize `g_process.exec` based on `libos.entrypoint` manifest key. */
@@ -111,28 +110,23 @@ static int init_exec_handle(void) {
         goto out;
     }
 
-    hdl = get_new_handle();
-    if (!hdl) {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    ret = open_executable(hdl, exec_path);
+    char** new_argv = NULL;
+    ret = load_and_check_exec(exec_path, argv, &exec_handle, &new_argv);
     if (ret < 0) {
-        log_error("Error opening executable %s: %d", exec_path, ret);
         goto out;
     }
 
     lock(&g_process.fs_lock);
-    g_process.exec = hdl;
-    get_handle(hdl);
+    g_process.exec = exec_handle;
+    get_handle(exec_handle);
     unlock(&g_process.fs_lock);
 
+    *out_new_argv = new_argv;
     ret = 0;
 out:
     free(entrypoint);
-    if (hdl)
-        put_handle(hdl);
+    if (exec_handle)
+        put_handle(exec_handle);
     return ret;
 }
 
@@ -154,12 +148,12 @@ int init_handle(void) {
     return 0;
 }
 
-int init_important_handles(void) {
+int init_std_handles(void) {
     int ret;
     struct libos_thread* thread = get_cur_thread();
 
     if (thread->handle_map)
-        goto done;
+        return 0;
 
     struct libos_handle_map* handle_map = get_thread_handle_map(thread);
 
@@ -230,9 +224,7 @@ int init_important_handles(void) {
         handle_map->fd_top = 2;
 
     unlock(&handle_map->lock);
-
-done:
-    return init_exec_handle();
+    return 0;
 }
 
 struct libos_handle* __get_fd_handle(uint32_t fd, int* fd_flags, struct libos_handle_map* map) {
@@ -331,6 +323,19 @@ struct libos_handle* detach_fd_handle(uint32_t fd, int* flags,
     return handle;
 }
 
+static int detach_fd(struct libos_fd_handle* fd_hdl, struct libos_handle_map* map) {
+    struct libos_handle* hdl = __detach_fd_handle(fd_hdl, NULL, map);
+    put_handle(hdl);
+    return 0;
+}
+
+void detach_all_fds(void) {
+    struct libos_handle_map* handle_map = get_thread_handle_map(NULL);
+    assert(handle_map);
+
+    walk_handle_map(&detach_fd, handle_map);
+}
+
 struct libos_handle* get_new_handle(void) {
     struct libos_handle* new_handle =
         get_mem_obj_from_mgr_enlarge(handle_mgr, size_align_up(HANDLE_MGR_ALLOC));
@@ -338,7 +343,7 @@ struct libos_handle* get_new_handle(void) {
         return NULL;
 
     memset(new_handle, 0, sizeof(struct libos_handle));
-    REF_SET(new_handle->ref_count, 1);
+    refcount_set(&new_handle->ref_count, 1);
     if (!create_lock(&new_handle->lock)) {
         free_mem_obj_to_mgr(handle_mgr, new_handle);
         return NULL;
@@ -465,13 +470,7 @@ static inline __attribute__((unused)) const char* __handle_name(struct libos_han
 }
 
 void get_handle(struct libos_handle* hdl) {
-#ifdef DEBUG_REF
-    int ref_count = REF_INC(hdl->ref_count);
-
-    log_debug("get handle %p(%s) (ref_count = %d)", hdl, __handle_name(hdl), ref_count);
-#else
-    REF_INC(hdl->ref_count);
-#endif
+    refcount_inc(&hdl->ref_count);
 }
 
 static void destroy_handle(struct libos_handle* hdl) {
@@ -482,11 +481,7 @@ static void destroy_handle(struct libos_handle* hdl) {
 }
 
 void put_handle(struct libos_handle* hdl) {
-    int ref_count = REF_DEC(hdl->ref_count);
-
-#ifdef DEBUG_REF
-    log_debug("put handle %p(%s) (ref_count = %d)", hdl, __handle_name(hdl), ref_count);
-#endif
+    refcount_t ref_count = refcount_dec(&hdl->ref_count);
 
     if (!ref_count) {
         assert(hdl->epoll_items_count == 0);
@@ -502,9 +497,6 @@ void put_handle(struct libos_handle* hdl) {
         free(hdl->uri);
 
         if (hdl->pal_handle) {
-#ifdef DEBUG_REF
-            log_debug("handle %p closes PAL handle %p", hdl, hdl->pal_handle);
-#endif
             PalObjectClose(hdl->pal_handle); // TODO: handle errors
             hdl->pal_handle = NULL;
         }
@@ -561,7 +553,7 @@ static struct libos_handle_map* get_new_handle_map(uint32_t size) {
         return NULL;
     }
 
-    REF_SET(handle_map->ref_count, 1);
+    refcount_set(&handle_map->ref_count, 1);
 
     return handle_map;
 }
@@ -636,11 +628,11 @@ done:
 }
 
 void get_handle_map(struct libos_handle_map* map) {
-    REF_INC(map->ref_count);
+    refcount_inc(&map->ref_count);
 }
 
 void put_handle_map(struct libos_handle_map* map) {
-    int ref_count = REF_DEC(map->ref_count);
+    refcount_t ref_count = refcount_dec(&map->ref_count);
 
     if (!ref_count) {
         if (map->fd_top == FD_NULL)
@@ -672,10 +664,7 @@ int walk_handle_map(int (*callback)(struct libos_fd_handle*, struct libos_handle
     int ret = 0;
     lock(&map->lock);
 
-    if (map->fd_top == FD_NULL)
-        goto done;
-
-    for (uint32_t i = 0; i <= map->fd_top; i++) {
+    for (uint32_t i = 0; map->fd_top != FD_NULL && i <= map->fd_top; i++) {
         if (!HANDLE_ALLOCATED(map->map[i]))
             continue;
 
@@ -683,7 +672,6 @@ int walk_handle_map(int (*callback)(struct libos_fd_handle*, struct libos_handle
             break;
     }
 
-done:
     unlock(&map->lock);
     return ret;
 }
@@ -714,7 +702,7 @@ BEGIN_CP_FUNC(handle) {
         *new_hdl = *hdl;
 
         new_hdl->dentry = NULL;
-        REF_SET(new_hdl->ref_count, 0);
+        refcount_set(&new_hdl->ref_count, 0);
         clear_lock(&new_hdl->lock);
         clear_lock(&new_hdl->pos_lock);
 
@@ -891,7 +879,7 @@ BEGIN_CP_FUNC(handle_map) {
         new_handle_map->fd_size = fd_size;
         new_handle_map->map     = fd_size ? ptr_array : NULL;
 
-        REF_SET(new_handle_map->ref_count, 0);
+        refcount_set(&new_handle_map->ref_count, 0);
         clear_lock(&new_handle_map->lock);
 
         for (int i = 0; i < fd_size; i++) {
