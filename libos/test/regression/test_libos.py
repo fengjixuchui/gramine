@@ -170,6 +170,13 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('User Program Started', stdout)
         self.assertIn('Exception \'test runtime error\' caught', stdout)
 
+    def test_111_argv_from_manifest(self):
+        expected_argv = ['bootstrap', 'THIS', 'SHOULD GO', 'TO', 'THE', 'APP ']
+        stdout, _ = self.run_binary(['argv_from_manifest'])
+        self.assertIn(f'# of arguments: {len(expected_argv)}\n', stdout)
+        for i, arg in enumerate(expected_argv):
+            self.assertIn(f'argv[{i}] = {arg}\n', stdout)
+
     def test_200_exec(self):
         stdout, _ = self.run_binary(['exec'])
 
@@ -1012,8 +1019,11 @@ class TC_40_FileSystem(RegressionTestCase):
         self.assertIn('/proc/stat test passed', stdout)
 
     def test_030_fdleak(self):
-        stdout, _ = self.run_binary(['fdleak'], timeout=10)
-        self.assertIn("Test succeeded.", stdout)
+        # The fd limit is rather arbitrary, but must be in sync with numbers from the test.
+        # Currently test opens 10 fds simultaneously, so 50 is a safe margin for any fds that
+        # Gramine might open internally.
+        stdout, _ = self.run_binary(['fdleak'], timeout=40, open_fds_limit=50)
+        self.assertIn("TEST OK", stdout)
 
     def get_cache_levels_cnt(self):
         cpu0 = '/sys/devices/system/cpu/cpu0/'
@@ -1144,7 +1154,7 @@ class TC_50_GDB(RegressionTestCase):
         stdout, _ = self.run_gdb(['debug'], 'debug.gdb')
 
         backtrace_1 = self.find('backtrace 1', stdout)
-        self.assertIn(f' main ()', backtrace_1)
+        self.assertIn(' main ()', backtrace_1)
         self.assertIn(' _start ()', backtrace_1)
         self.assertIn('debug.c', backtrace_1)
         if not USES_MUSL:

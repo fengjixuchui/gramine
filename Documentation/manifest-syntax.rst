@@ -116,25 +116,34 @@ or
 
 ::
 
+   loader.argv = ["arg0", "arg1", "arg2", ...]
+
+or
+
+::
+
    loader.argv_src_file = "file:file_with_serialized_argv"
 
-If you want your application to use commandline arguments you need to either set
-``loader.insecure__use_cmdline_argv`` (insecure in almost all cases) or point
-``loader.argv_src_file`` to a file containing output of
-:ref:`gramine-argv-serializer<gramine-argv-serializer>`.
+If you want your application to use commandline arguments, you must choose one
+of the three mutually exclusive options:
+
+- set ``loader.insecure__use_cmdline_argv`` (insecure in almost all cases),
+- put commandline arguments into ``loader.argv`` array,
+- point ``loader.argv_src_file`` to a file
+  containing output of :ref:`gramine-argv-serializer<gramine-argv-serializer>`.
+
+If none of the above arguments-handling manifest options is specified in the
+manifest, the application will get ``argv = [ <libos.entrypoint value> ]``.
 
 ``loader.argv_src_file`` is intended to point to either a trusted file or an
-encrypted file. The former allows to securely hardcode arguments (current
-manifest syntax doesn't allow to include them inline), the latter allows the
-arguments to be provided at runtime from an external (trusted) source.
+encrypted file. The former allows to securely hardcode arguments, the latter
+allows the arguments to be provided at runtime from an external (trusted)
+source.
 
 .. note ::
    Pointing to an encrypted file is currently not supported, due to the fact
    that encryption key provisioning currently happens after setting up
    arguments.
-
-If none of the above arguments-handling manifest options is specified in the
-manifest, the application will get ``argv = [ <libos.entrypoint value> ]``.
 
 Environment variables
 ^^^^^^^^^^^^^^^^^^^^^
@@ -502,7 +511,7 @@ Number of RPC threads (Exitless feature)
 
 ::
 
-    sgx.rpc_thread_num = [NUM]
+    sgx.insecure__rpc_thread_num = [NUM]
     (Default: 0)
 
 This syntax specifies the number of RPC threads that are created outside of
@@ -515,7 +524,7 @@ the enclave (except for a few syscalls where there is no benefit, e.g.,
 If user specifies ``0`` or omits this directive, then no RPC threads are
 created and all system calls perform an enclave exit ("normal" execution).
 
-Note that the number of created RPC threads must match the maximum number of
+Note that the number of created RPC threads should match the maximum number of
 simultaneous enclave threads. If there are more RPC threads, then CPU time is
 wasted. If there are less RPC threads, some enclave threads may starve,
 especially if there are many blocking system calls by other enclave threads.
@@ -525,6 +534,9 @@ OCALLs/ECALLs for fast shared-memory communication at the cost of occupying
 more CPU cores and burning more CPU cycles. For example, a single-threaded
 Redis instance on Linux becomes 5-threaded on Gramine with Exitless. Thus,
 Exitless may negatively impact throughput but may improve latency.
+
+This feature is currently marked as insecure, because it reads untrusted memory
+in potentially insecure manner - susceptible to CVE-2022-21233 (INTEL-SA-00657).
 
 Optional CPU features (AVX, AVX512, MPX, PKRU, AMX)
 ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^

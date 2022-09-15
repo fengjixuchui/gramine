@@ -10,6 +10,8 @@
  * arguments and manifest.
  */
 
+#include <stdalign.h>
+#include <stdbool.h>
 #include <stdint.h>
 #include <stdnoreturn.h>
 
@@ -21,6 +23,7 @@
 #include "pal_linux.h"
 #include "pal_linux_defs.h"
 #include "pal_linux_error.h"
+#include "pal_rpc_queue.h"
 #include "pal_rtld.h"
 #include "pal_topology.h"
 #include "toml.h"
@@ -50,6 +53,22 @@ void _PalGetAvailableUserAddressRange(void** out_start, void** out_end) {
     }
 }
 
+static bool verify_and_init_rpc_queue(void* untrusted_rpc_queue) {
+    if (!untrusted_rpc_queue) {
+        /* user app didn't request RPC queue (i.e., the app didn't request exitless syscalls) */
+        return true;
+    }
+
+    if (!sgx_is_valid_untrusted_ptr(untrusted_rpc_queue, sizeof(*g_rpc_queue),
+                                    alignof(__typeof__(*g_rpc_queue)))) {
+        /* malicious RPC queue object, return error */
+        return false;
+    }
+
+    g_rpc_queue = untrusted_rpc_queue;
+    return true;
+}
+
 /*
  * Takes a pointer+size to an untrusted memory region containing a
  * NUL-separated list of strings. It builds an argv-style list in trusted memory
@@ -74,9 +93,12 @@ static const char** make_argv_list(void* uptr_src, size_t src_size) {
         return argv;
     }
 
-    char* data = sgx_import_to_enclave(uptr_src, src_size);
+    char* data = malloc(src_size);
     if (!data) {
         return NULL;
+    }
+    if (!sgx_copy_to_enclave(data, src_size, uptr_src, src_size)) {
+        goto fail;
     }
     data[src_size - 1] = '\0';
 
@@ -208,12 +230,12 @@ static int sanitize_topo_info(struct pal_topo_info* topo_info) {
     return 0;
 }
 
-static int import_and_sanitize_topo_info(struct pal_topo_info* uptr_topo_info) {
+static int import_and_sanitize_topo_info(void* uptr_topo_info) {
     /* Import topology information via an untrusted pointer. This is only a shallow copy and we use
      * this temp variable to do deep copy into `g_pal_public_state.topo_info` */
     struct pal_topo_info shallow_topo_info;
     if (!sgx_copy_to_enclave(&shallow_topo_info, sizeof(shallow_topo_info),
-                             uptr_topo_info, sizeof(*uptr_topo_info))) {
+                             uptr_topo_info, sizeof(struct pal_topo_info))) {
         return -PAL_ERROR_DENIED;
     }
 
@@ -255,8 +277,8 @@ static int import_and_sanitize_topo_info(struct pal_topo_info* uptr_topo_info) {
     return sanitize_topo_info(topo_info);
 }
 
-extern void* g_enclave_base;
-extern void* g_enclave_top;
+extern uintptr_t g_enclave_base;
+extern uintptr_t g_enclave_top;
 extern bool g_allowed_files_warn;
 
 static int print_warnings_on_insecure_configs(PAL_HANDLE parent_process) {
@@ -413,10 +435,10 @@ static void do_preheat_enclave(void) {
 /* Gramine uses GCC's stack protector that looks for a canary at gs:[0x8], but this function starts
  * with a default canary and then updates it to a random one, so we disable stack protector here */
 __attribute_no_stack_protector
-noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char* uptr_args,
-                             size_t args_size, char* uptr_env, size_t env_size,
-                             int parent_stream_fd, sgx_target_info_t* uptr_qe_targetinfo,
-                             struct pal_topo_info* uptr_topo_info) {
+noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void* uptr_args,
+                             size_t args_size, void* uptr_env, size_t env_size,
+                             int parent_stream_fd, void* uptr_qe_targetinfo, void* uptr_topo_info,
+                             void* uptr_rpc_queue) {
     /* All our arguments are coming directly from the host. We are responsible to check them. */
     int ret;
 
@@ -443,33 +465,28 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     g_pal_linuxsgx_state.heap_min = GET_ENCLAVE_TCB(heap_min);
     g_pal_linuxsgx_state.heap_max = GET_ENCLAVE_TCB(heap_max);
 
-    /* Skip URI_PREFIX_FILE. */
     if (libpal_uri_len < URI_PREFIX_FILE_LEN) {
         log_error("Invalid libpal_uri length (missing \"%s\" prefix?)", URI_PREFIX_FILE);
         ocall_exit(1, /*is_exitgroup=*/true);
     }
-    libpal_uri_len -= URI_PREFIX_FILE_LEN;
-    uptr_libpal_uri += URI_PREFIX_FILE_LEN;
 
     /* At this point we don't yet have memory manager, so we cannot allocate memory dynamically. */
-    static char libpal_path[1024 + 1];
-    if (libpal_uri_len >= sizeof(libpal_path)
-            || !sgx_copy_to_enclave(libpal_path, sizeof(libpal_path) - 1, uptr_libpal_uri,
-                                    libpal_uri_len)) {
+    static char libpal_path[1024 + 1] = { 0 };
+    if (!sgx_copy_to_enclave(libpal_path, sizeof(libpal_path) - 1, uptr_libpal_uri,
+                             libpal_uri_len)) {
         log_error("Copying libpal_path into the enclave failed");
         ocall_exit(1, /*is_exitgroup=*/true);
     }
-    libpal_path[libpal_uri_len] = '\0';
 
     /* Now that we have `libpal_path`, set name for PAL map */
-    set_pal_binary_name(libpal_path);
+    set_pal_binary_name(libpal_path + URI_PREFIX_FILE_LEN);
 
     /* We can't verify the following arguments from the host. So we copy them directly but need to
      * be careful when we use them. */
     if (!sgx_copy_to_enclave(&g_pal_linuxsgx_state.qe_targetinfo,
                              sizeof(g_pal_linuxsgx_state.qe_targetinfo),
                              uptr_qe_targetinfo,
-                             sizeof(*uptr_qe_targetinfo))) {
+                             sizeof(sgx_target_info_t))) {
         log_error("Copying qe_targetinfo into the enclave failed");
         ocall_exit(1, /*is_exitgroup=*/true);
     }
@@ -537,7 +554,7 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     }
 
     uint64_t manifest_size = GET_ENCLAVE_TCB(manifest_size);
-    void* manifest_addr = g_enclave_top - ALIGN_UP_PTR_POW2(manifest_size, g_page_size);
+    void* manifest_addr = (void*)(g_enclave_top - ALIGN_UP_POW2(manifest_size, g_page_size));
 
     ret = add_preloaded_range((uintptr_t)manifest_addr, (uintptr_t)manifest_addr + manifest_size,
                               "manifest");
@@ -569,10 +586,24 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     g_pal_common_state.raw_manifest_data = manifest_addr;
     g_pal_public_state.manifest_root = manifest_root;
 
+    int64_t rpc_thread_num;
+    ret = toml_int_in(g_pal_public_state.manifest_root, "sgx.insecure__rpc_thread_num",
+                      /*defaultval=*/0, &rpc_thread_num);
+    if (ret < 0) {
+        log_error("Cannot parse 'sgx.insecure__rpc_thread_num'");
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
+    if (rpc_thread_num > 0) {
+        if (!verify_and_init_rpc_queue(uptr_rpc_queue)) {
+            log_error("Invalid rpc queue pointer");
+            ocall_exit(1, /*is_exitgroup=*/true);
+        }
+    }
+
     /* Get host topology information only for the first process. This information will be
      * checkpointed and restored during forking of the child process(es). */
     if (parent_stream_fd < 0) {
-        /* parse and store host topology info into g_pal_public_state struct */
+        /* Parse, sanitize and store host topology info into g_pal_public_state struct */
         ret = import_and_sanitize_topo_info(uptr_topo_info);
         if (ret < 0) {
             log_error("Failed to copy and sanitize topology information");
@@ -650,7 +681,7 @@ noreturn void pal_linux_main(char* uptr_libpal_uri, size_t libpal_uri_len, char*
     }
 
     init_handle_hdr(first_thread, PAL_TYPE_THREAD);
-    first_thread->thread.tcs = g_enclave_base + GET_ENCLAVE_TCB(tcs_offset);
+    first_thread->thread.tcs = (void*)(g_enclave_base + GET_ENCLAVE_TCB(tcs_offset));
     g_pal_public_state.first_thread = first_thread;
     SET_ENCLAVE_TCB(thread, &first_thread->thread);
 
