@@ -65,16 +65,13 @@ int init_child_process(int parent_stream_fd, PAL_HANDLE* out_parent, uint64_t* o
 
 #ifdef IN_ENCLAVE
 
-int init_enclave(void);
-void init_untrusted_slab_mgr(void);
-
 extern const size_t g_page_size;
 extern size_t g_pal_internal_mem_size;
 
 noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void* uptr_args,
                              size_t args_size, void* uptr_env, size_t env_size,
                              int parent_stream_fd, void* uptr_qe_targetinfo, void* uptr_topo_info,
-                             void* uptr_rpc_queue);
+                             void* uptr_rpc_queue, void* uptr_dns_conf);
 void pal_start_thread(void);
 
 extern char __text_start, __text_end, __data_start, __data_end;
@@ -110,7 +107,6 @@ void init_tsc(void);
 int init_cpuid(void);
 
 int init_enclave(void);
-void init_untrusted_slab_mgr(void);
 
 /* master key for all enclaves of one application, populated by the first enclave and inherited by
  * all other enclaves (children, their children, etc.); used as master key in pipes' encryption */

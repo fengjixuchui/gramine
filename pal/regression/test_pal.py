@@ -29,6 +29,10 @@ class TC_00_Basic(RegressionTestCase):
         _, stderr = self.run_binary(['printf_test'])
         self.assertIn("TEST OK", stderr)
 
+    def test_004_strtoll(self):
+        _, stderr = self.run_binary(['strtoll_test'])
+        self.assertIn("TEST OK", stderr)
+
 
 class TC_00_BasicSet2(RegressionTestCase):
     @unittest.skipUnless(ON_X86, "x86-specific")
@@ -472,6 +476,15 @@ class TC_23_SendHandle(RegressionTestCase):
         _, stderr = self.run_binary(['send_handle'])
         self.assertIn('Parent: test OK', stderr)
         self.assertIn('Child: test OK', stderr)
+
+class TC_30_IPParser(RegressionTestCase):
+    def test_000_ipv4(self):
+        _, stderr = self.run_binary(['ipv4_parser'])
+        self.assertIn('TEST OK', stderr)
+
+    def test_010_ipv6(self):
+        _, stderr = self.run_binary(['ipv6_parser'])
+        self.assertIn('TEST OK', stderr)
 
 @unittest.skipUnless(HAS_SGX, 'This test is only meaningful on SGX PAL')
 class TC_50_Attestation(RegressionTestCase):

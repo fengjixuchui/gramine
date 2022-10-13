@@ -235,6 +235,7 @@ bool sys_resource_name_exists(struct libos_dentry* parent, const char* name);
 int sys_resource_list_names(struct libos_dentry* parent, readdir_callback_t callback, void* arg);
 int sys_node_general_load(struct libos_dentry* dent, char** out_data, size_t* out_size);
 int sys_node_load(struct libos_dentry* dent, char** out_data, size_t* out_size);
+int sys_node_meminfo_load(struct libos_dentry* dent, char** out_data, size_t* out_size);
 int sys_cpu_general_load(struct libos_dentry* dent, char** out_data, size_t* out_size);
 int sys_cpu_load_online(struct libos_dentry* dent, char** out_data, size_t* out_size);
 int sys_cpu_load_topology(struct libos_dentry* dent, char** out_data, size_t* out_size);
@@ -256,3 +257,6 @@ int sys_print_as_ranges(char* buf, size_t buf_size, size_t count,
 int sys_print_as_bitmask(char* buf, size_t buf_size, size_t count,
                          bool (*is_present)(size_t ind, const void* arg),
                          const void* callback_arg);
+
+/* etcfs */
+int init_etcfs(void);

@@ -13,6 +13,8 @@ manifests = [
   "File2",
   "HelloWorld",
   "Hex",
+  "ipv4_parser",
+  "ipv6_parser",
   "Memory",
   "Misc",
   "Pie",
@@ -25,6 +27,7 @@ manifests = [
   "normalize_path",
   "printf_test",
   "send_handle",
+  "strtoll_test",
 ]
 
 [arch.x86_64]
