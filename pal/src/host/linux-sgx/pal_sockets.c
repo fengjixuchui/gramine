@@ -80,9 +80,14 @@ static PAL_HANDLE create_sock_handle(int fd, enum pal_socket_domain domain,
     handle->sock.sendtimeout_us = 0;
     handle->sock.is_nonblocking = is_nonblocking;
     handle->sock.reuseaddr = false;
+    handle->sock.reuseport = false;
     handle->sock.keepalive = false;
     handle->sock.broadcast = false;
     handle->sock.tcp_cork = false;
+    handle->sock.tcp_keepidle = DEFAULT_TCP_KEEPIDLE;
+    handle->sock.tcp_keepintvl = DEFAULT_TCP_KEEPINTVL;
+    handle->sock.tcp_keepcnt = DEFAULT_TCP_KEEPCNT;
+    handle->sock.tcp_user_timeout = DEFAULT_TCP_USER_TIMEOUT;
     handle->sock.tcp_nodelay = false;
     handle->sock.ipv6_v6only = false;
 
@@ -135,7 +140,8 @@ int _PalSocketCreate(enum pal_socket_domain domain, enum pal_socket_type type,
     if (!handle) {
         int ret = ocall_close(fd);
         if (ret < 0) {
-            log_error("%s:%d closing socket fd failed: %d", __func__, __LINE__, ret);
+            log_error("%s:%d closing socket fd failed: %s", __func__, __LINE__,
+                      unix_strerror(ret));
         }
         return -PAL_ERROR_NOMEM;
     }
@@ -147,7 +153,8 @@ int _PalSocketCreate(enum pal_socket_domain domain, enum pal_socket_type type,
 static int close(PAL_HANDLE handle) {
     int ret = ocall_close(handle->sock.fd);
     if (ret < 0) {
-        log_error("%s: closing socket fd failed: %d", __func__, ret);
+        log_error("%s:%d closing socket fd failed: %s", __func__, __LINE__,
+                  unix_strerror(ret));
         /* We cannot do anything about it anyway... */
     }
     return 0;
@@ -217,7 +224,8 @@ static int tcp_accept(PAL_HANDLE handle, pal_stream_options_t options, PAL_HANDL
     if (!client) {
         int ret = ocall_close(fd);
         if (ret < 0) {
-            log_error("%s:%d closing socket fd failed: %d", __func__, __LINE__, ret);
+            log_error("%s:%d closing socket fd failed: %s", __func__, __LINE__,
+                      unix_strerror(ret));
         }
         return -PAL_ERROR_NOMEM;
     }
@@ -290,10 +298,15 @@ static int attrquerybyhdl(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     attr->socket.receivetimeout_us = handle->sock.recvtimeout_us;
     attr->socket.sendtimeout_us = handle->sock.sendtimeout_us;
     attr->socket.reuseaddr = handle->sock.reuseaddr;
+    attr->socket.reuseport = handle->sock.reuseport;
     attr->socket.keepalive = handle->sock.keepalive;
     attr->socket.broadcast = handle->sock.broadcast;
     attr->socket.tcp_cork = handle->sock.tcp_cork;
+    attr->socket.tcp_keepidle = handle->sock.tcp_keepidle;
+    attr->socket.tcp_keepintvl = handle->sock.tcp_keepintvl;
+    attr->socket.tcp_keepcnt = handle->sock.tcp_keepcnt;
     attr->socket.tcp_nodelay = handle->sock.tcp_nodelay;
+    attr->socket.tcp_user_timeout = handle->sock.tcp_user_timeout;
     attr->socket.ipv6_v6only = handle->sock.ipv6_v6only;
 
     return 0;
@@ -398,6 +411,15 @@ static int attrsetbyhdl_common(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
         handle->sock.reuseaddr = attr->socket.reuseaddr;
     }
 
+    if (attr->socket.reuseport != handle->sock.reuseport) {
+        int val = attr->socket.reuseport;
+        int ret = ocall_setsockopt(handle->sock.fd, SOL_SOCKET, SO_REUSEPORT, &val, sizeof(val));
+        if (ret < 0) {
+            return unix_to_pal_error(ret);
+        }
+        handle->sock.reuseport = attr->socket.reuseport;
+    }
+
     if (attr->socket.broadcast != handle->sock.broadcast) {
         int val = attr->socket.broadcast;
         int ret = ocall_setsockopt(handle->sock.fd, SOL_SOCKET, SO_BROADCAST, &val, sizeof(val));
@@ -436,6 +458,36 @@ static int attrsetbyhdl_tcp(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
         handle->sock.tcp_cork = attr->socket.tcp_cork;
     }
 
+    if (attr->socket.tcp_keepidle != handle->sock.tcp_keepidle) {
+        assert(attr->socket.tcp_keepidle >= 1 && attr->socket.tcp_keepidle <= MAX_TCP_KEEPIDLE);
+        int val = attr->socket.tcp_keepidle;
+        int ret = ocall_setsockopt(handle->sock.fd, SOL_TCP, TCP_KEEPIDLE, &val, sizeof(val));
+        if (ret < 0) {
+            return unix_to_pal_error(ret);
+        }
+        handle->sock.tcp_keepidle = attr->socket.tcp_keepidle;
+    }
+
+    if (attr->socket.tcp_keepintvl != handle->sock.tcp_keepintvl) {
+        assert(attr->socket.tcp_keepintvl >= 1 && attr->socket.tcp_keepintvl <= MAX_TCP_KEEPINTVL);
+        int val = attr->socket.tcp_keepintvl;
+        int ret = ocall_setsockopt(handle->sock.fd, SOL_TCP, TCP_KEEPINTVL, &val, sizeof(val));
+        if (ret < 0) {
+            return unix_to_pal_error(ret);
+        }
+        handle->sock.tcp_keepintvl = attr->socket.tcp_keepintvl;
+    }
+
+    if (attr->socket.tcp_keepcnt != handle->sock.tcp_keepcnt) {
+        assert(attr->socket.tcp_keepcnt >= 1 && attr->socket.tcp_keepcnt <= MAX_TCP_KEEPCNT);
+        int val = attr->socket.tcp_keepcnt;
+        int ret = ocall_setsockopt(handle->sock.fd, SOL_TCP, TCP_KEEPCNT, &val, sizeof(val));
+        if (ret < 0) {
+            return unix_to_pal_error(ret);
+        }
+        handle->sock.tcp_keepcnt = attr->socket.tcp_keepcnt;
+    }
+
     if (attr->socket.tcp_nodelay != handle->sock.tcp_nodelay) {
         int val = attr->socket.tcp_nodelay;
         int ret = ocall_setsockopt(handle->sock.fd, SOL_TCP, TCP_NODELAY, &val, sizeof(val));
@@ -443,6 +495,16 @@ static int attrsetbyhdl_tcp(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
             return unix_to_pal_error(ret);
         }
         handle->sock.tcp_nodelay = attr->socket.tcp_nodelay;
+    }
+
+    if (attr->socket.tcp_user_timeout != handle->sock.tcp_user_timeout) {
+        assert(attr->socket.tcp_user_timeout <= INT_MAX);
+        int val = attr->socket.tcp_user_timeout;
+        int ret = ocall_setsockopt(handle->sock.fd, SOL_TCP, TCP_USER_TIMEOUT, &val, sizeof(val));
+        if (ret < 0) {
+            return unix_to_pal_error(ret);
+        }
+        handle->sock.tcp_user_timeout = attr->socket.tcp_user_timeout;
     }
 
     return 0;
@@ -454,7 +516,7 @@ static int attrsetbyhdl_udp(PAL_HANDLE handle, PAL_STREAM_ATTR* attr) {
     return attrsetbyhdl_common(handle, attr);
 }
 
-static int send(PAL_HANDLE handle, struct pal_iovec* pal_iov, size_t iov_len, size_t* out_size,
+static int send(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* out_size,
                 struct pal_socket_addr* addr, bool force_nonblocking) {
     assert(handle->hdr.type == PAL_TYPE_SOCKET);
 
@@ -468,19 +530,9 @@ static int send(PAL_HANDLE handle, struct pal_iovec* pal_iov, size_t iov_len, si
         assert(linux_addrlen <= INT_MAX);
     }
 
-    struct iovec* iov = malloc(iov_len * sizeof(*iov));
-    if (!iov) {
-        return -PAL_ERROR_NOMEM;
-    }
-    for (size_t i = 0; i < iov_len; i++) {
-        iov[i].iov_base = pal_iov[i].iov_base;
-        iov[i].iov_len = pal_iov[i].iov_len;
-    }
-
     unsigned int flags = force_nonblocking ? MSG_DONTWAIT : 0;
     ssize_t ret = ocall_send(handle->sock.fd, iov, iov_len, addr ? &sa_storage : NULL,
                              linux_addrlen, /*control=*/NULL, /*controllen=*/0, flags);
-    free(iov);
     if (ret < 0) {
         return unix_to_pal_error(ret);
     }
@@ -488,21 +540,12 @@ static int send(PAL_HANDLE handle, struct pal_iovec* pal_iov, size_t iov_len, si
     return 0;
 }
 
-static int recv(PAL_HANDLE handle, struct pal_iovec* pal_iov, size_t iov_len,
-                size_t* out_total_size, struct pal_socket_addr* addr, bool force_nonblocking) {
+static int recv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* out_total_size,
+                struct pal_socket_addr* addr, bool force_nonblocking) {
     assert(handle->hdr.type == PAL_TYPE_SOCKET);
 
     struct sockaddr_storage sa_storage;
     size_t linux_addrlen = addr ? sizeof(sa_storage) : 0;
-
-    struct iovec* iov = malloc(iov_len * sizeof(*iov));
-    if (!iov) {
-        return -PAL_ERROR_NOMEM;
-    }
-    for (size_t i = 0; i < iov_len; i++) {
-        iov[i].iov_base = pal_iov[i].iov_base;
-        iov[i].iov_len = pal_iov[i].iov_len;
-    }
 
     unsigned int flags = force_nonblocking ? MSG_DONTWAIT : 0;
     if (handle->sock.type == PAL_SOCKET_UDP) {
@@ -512,7 +555,6 @@ static int recv(PAL_HANDLE handle, struct pal_iovec* pal_iov, size_t iov_len,
     }
     ssize_t ret = ocall_recv(handle->sock.fd, iov, iov_len, addr ? &sa_storage : NULL,
                              &linux_addrlen, /*control=*/NULL, /*controllenptr=*/NULL, flags);
-    free(iov);
     if (ret < 0) {
         return unix_to_pal_error(ret);
     }
@@ -633,7 +675,7 @@ int _PalSocketConnect(PAL_HANDLE handle, struct pal_socket_addr* addr,
     return handle->sock.ops->connect(handle, addr, out_local_addr);
 }
 
-int _PalSocketSend(PAL_HANDLE handle, struct pal_iovec* iov, size_t iov_len, size_t* out_size,
+int _PalSocketSend(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* out_size,
                    struct pal_socket_addr* addr, bool force_nonblocking) {
     if (!handle->sock.ops->send) {
         return -PAL_ERROR_NOTSUPPORT;
@@ -641,7 +683,7 @@ int _PalSocketSend(PAL_HANDLE handle, struct pal_iovec* iov, size_t iov_len, siz
     return handle->sock.ops->send(handle, iov, iov_len, out_size, addr, force_nonblocking);
 }
 
-int _PalSocketRecv(PAL_HANDLE handle, struct pal_iovec* iov, size_t iov_len, size_t* out_total_size,
+int _PalSocketRecv(PAL_HANDLE handle, struct iovec* iov, size_t iov_len, size_t* out_total_size,
                    struct pal_socket_addr* addr, bool force_nonblocking) {
     if (!handle->sock.ops->recv) {
         return -PAL_ERROR_NOTSUPPORT;

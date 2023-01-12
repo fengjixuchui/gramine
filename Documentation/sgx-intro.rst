@@ -90,9 +90,10 @@ For historical reasons, there are three SGX drivers currently (January 2021):
   deprecated
 
 - https://github.com/intel/SGXDataCenterAttestationPrimitives/tree/master/driver
-  -- new one, out-of-tree, supports both non-DCAP software infrastructure (with
-  old EPID remote-attestation technique) and the new DCAP (with new ECDSA and
-  more "normal" PKI infrastructure).
+  -- out-of-tree, supports both non-DCAP software infrastructure (with old EPID
+  remote-attestation technique) and the new DCAP (with new ECDSA and
+  more "normal" PKI infrastructure). Deprecated in favor of the upstreamed
+  driver (see below).
 
 - SGX support was upstreamed to the Linux mainline starting from 5.11.
   It currently supports only DCAP attestation. The driver is accessible through
@@ -272,8 +273,9 @@ SGX terminology
 
    Enclave Dynamic Memory Management
    EDMM
-      A |~| hardware feature of :term:`SGX2`, allows dynamic memory allocation,
-      which in turn allows dynamic thread creation.
+      A |~| hardware feature of :term:`SGX2`, allows for dynamic (in enclave
+      runtime) addition and removal of enclave memory, as well as changing
+      memory permissions and type. This in turn allows dynamic thread creation.
 
    Enclave Page Cache
    EPC

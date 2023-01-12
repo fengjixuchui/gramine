@@ -111,10 +111,12 @@ memory.
 .. doxygenfunction:: PalVirtualMemoryFree
    :project: pal
 
-.. doxygentypedef:: pal_alloc_flags_t
-   :project: pal
 .. doxygentypedef:: pal_prot_flags_t
    :project: pal
+
+.. doxygenstruct:: pal_initial_mem_range
+   :project: pal
+   :members:
 
 .. doxygenfunction:: PalVirtualMemoryProtect
    :project: pal
@@ -241,7 +243,7 @@ Socket handling
 .. doxygenstruct:: pal_socket_addr
    :project: pal
 
-.. doxygenstruct:: pal_iovec
+.. doxygenstruct:: iovec
    :project: pal
 
 .. doxygenfunction:: PalSocketCreate
@@ -356,9 +358,6 @@ and to obtain an attestation report and quote.
    :project: pal
 
 .. doxygenenum:: pal_segment_reg
-   :project: pal
-
-.. doxygenfunction:: PalMemoryAvailableQuota
    :project: pal
 
 .. doxygenfunction:: PalCpuIdRetrieve

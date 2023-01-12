@@ -51,7 +51,9 @@ typedef uint32_t sgx_misc_select_t;
 typedef uint16_t sgx_prod_id_t;
 typedef uint16_t sgx_isv_svn_t;
 typedef uint16_t sgx_config_svn_t;
-typedef uint8_t sgx_config_id_t[SGX_CONFIGID_SIZE];
+typedef struct {
+    uint8_t data[SGX_CONFIGID_SIZE];
+} sgx_config_id_t;
 
 #define SGX_ISVEXT_PROD_ID_SIZE 16
 #define SGX_ISV_FAMILY_ID_SIZE  16
@@ -216,24 +218,51 @@ static_assert(offsetof(sgx_cpu_context_t, rip) - offsetof(sgx_cpu_context_t, r15
 static_assert(offsetof(sgx_cpu_context_t, rip) - offsetof(sgx_cpu_context_t, rsp) <= RED_ZONE_SIZE,
               "rsp needs to be within red zone distance from rip");
 
+/* These numbers match x86 trap numbers. */
+enum sgx_arch_exception_vector {
+    SGX_EXCEPTION_VECTOR_DE = 0,    /* Divider exception */
+    SGX_EXCEPTION_VECTOR_DB = 1,    /* Debug exception */
+    SGX_EXCEPTION_VECTOR_BP = 3,    /* Breakpoint exception */
+    SGX_EXCEPTION_VECTOR_BR = 5,    /* Bound range exceeded exception */
+    SGX_EXCEPTION_VECTOR_UD = 6,    /* Invalid opcode exception */
+    SGX_EXCEPTION_VECTOR_GP = 13,   /* #GP exception. Only reported if SECS.MISCSELECT.EXINFO = 1 */
+    SGX_EXCEPTION_VECTOR_PF = 14,   /* #PF exception. Only reported if SECS.MISCSELECT.EXINFO = 1 */
+    SGX_EXCEPTION_VECTOR_MF = 16,   /* x87 FPU floating-point error */
+    SGX_EXCEPTION_VECTOR_AC = 17,   /* Alignment check exceptions */
+    SGX_EXCEPTION_VECTOR_XM = 19,   /* SIMD floating-point exceptions */
+    SGX_EXCEPTION_VECTOR_CP = 21,   /* #CP exception. Only reported if SECS.MISCSELECT.CPINFO = 1 */
+};
+
 typedef struct {
-    uint32_t vector : 8;
+    enum sgx_arch_exception_vector vector : 8;
     uint32_t exit_type : 3;
     uint32_t reserved : 20;
     uint32_t valid : 1;
 } sgx_arch_exit_info_t;
+static_assert(sizeof(sgx_arch_exit_info_t) == 4, "invalid size");
 
 #define SGX_EXCEPTION_HARDWARE 3UL
 #define SGX_EXCEPTION_SOFTWARE 6UL
 
-#define SGX_EXCEPTION_VECTOR_DE 0UL  /* DIV and IDIV instructions */
-#define SGX_EXCEPTION_VECTOR_DB 1UL  /* For Intel use only */
-#define SGX_EXCEPTION_VECTOR_BP 3UL  /* INT 3 instruction */
-#define SGX_EXCEPTION_VECTOR_BR 5UL  /* BOUND instruction */
-#define SGX_EXCEPTION_VECTOR_UD 6UL  /* UD2 instruction or reserved opcodes */
-#define SGX_EXCEPTION_VECTOR_MF 16UL /* x87 FPU floating-point or WAIT/FWAIT instruction */
-#define SGX_EXCEPTION_VECTOR_AC 17UL /* Any data reference in memory */
-#define SGX_EXCEPTION_VECTOR_XM 19UL /* Any SIMD floating-point exceptions */
+typedef struct {
+    uint64_t maddr;
+    union {
+        struct {
+            uint32_t p:1;
+            uint32_t w:1;
+            uint32_t u:1;
+            uint32_t rsvd:1;
+            uint32_t i:1;
+            uint32_t pk:1;
+            uint32_t reserved1:9;
+            uint32_t sgx:1;
+            uint32_t reserved2:16;
+        } errcd;
+        uint32_t error_code_val;
+    };
+    uint32_t reserved;
+} sgx_arch_exinfo_t;
+static_assert(sizeof(sgx_arch_exinfo_t) == 16, "invalid size");
 
 typedef struct {
     uint64_t lin_addr;
@@ -247,60 +276,49 @@ typedef struct {
     uint64_t reserved[7];
 } sgx_arch_sec_info_t;
 
-#define SGX_SECINFO_FLAGS_R    0x001
-#define SGX_SECINFO_FLAGS_W    0x002
-#define SGX_SECINFO_FLAGS_X    0x004
-#define SGX_SECINFO_FLAGS_SECS 0x000
-#define SGX_SECINFO_FLAGS_TCS  0x100
-#define SGX_SECINFO_FLAGS_REG  0x200
+enum sgx_page_type {
+    SGX_PAGE_TYPE_SECS,
+    SGX_PAGE_TYPE_TCS,
+    SGX_PAGE_TYPE_REG,
+    SGX_PAGE_TYPE_VA,
+    SGX_PAGE_TYPE_TRIM,
+};
 
-typedef struct _css_header_t {
-    uint8_t  header[12];
-    uint32_t type;
-    uint32_t module_vendor;
-    uint32_t date;
-    uint8_t  header2[16];
-    uint32_t hw_version;
-    uint8_t  reserved[84];
-} css_header_t;
-static_assert(sizeof(css_header_t) == 128, "incorrect struct size");
+#define SGX_SECINFO_FLAGS_R         (1 << 0)
+#define SGX_SECINFO_FLAGS_W         (1 << 1)
+#define SGX_SECINFO_FLAGS_X         (1 << 2)
+#define SGX_SECINFO_FLAGS_PENDING   (1 << 3)
+#define SGX_SECINFO_FLAGS_MODIFIED  (1 << 4)
+#define SGX_SECINFO_FLAGS_TYPE_SHIFT 8
 
-typedef struct _css_key_t {
-    uint8_t modulus[SE_KEY_SIZE];
-    uint8_t exponent[SE_EXPONENT_SIZE];
-    uint8_t signature[SE_KEY_SIZE];
-} css_key_t;
-static_assert(sizeof(css_key_t) == 772, "incorrect struct size");
-
-typedef struct _css_body_t {
-    sgx_misc_select_t    misc_select;
-    sgx_misc_select_t    misc_mask;
-    uint8_t              reserved[4];
+typedef struct {
+    uint8_t              header[16];
+    uint32_t             vendor;
+    uint32_t             date;
+    uint8_t              header2[16];
+    uint32_t             swdefined;
+    uint8_t              reserved1[84];
+    uint8_t              modulus[SE_KEY_SIZE];
+    uint8_t              exponent[SE_EXPONENT_SIZE];
+    uint8_t              signature[SE_KEY_SIZE];
+    uint32_t             misc_select;
+    uint32_t             misc_mask;
+    uint8_t              cet_attributes;
+    uint8_t              cet_attributes_mask;
+    uint8_t              reserved2[2];
     sgx_isvfamily_id_t   isv_family_id;
     sgx_attributes_t     attributes;
     sgx_attributes_t     attribute_mask;
     sgx_measurement_t    enclave_hash;
-    uint8_t              reserved2[16];
+    uint8_t              reserved3[16];
     sgx_isvext_prod_id_t isvext_prod_id;
     uint16_t             isv_prod_id;
     uint16_t             isv_svn;
-} css_body_t;
-static_assert(sizeof(css_body_t) == 128, "incorrect struct size");
-
-typedef struct _css_buffer_t {
-    uint8_t reserved[12];
-    uint8_t q1[SE_KEY_SIZE];
-    uint8_t q2[SE_KEY_SIZE];
-} css_buffer_t;
-static_assert(sizeof(css_buffer_t) == 780, "incorrect struct size");
-
-typedef struct _enclave_css_t {
-    css_header_t header;
-    css_key_t    key;
-    css_body_t   body;
-    css_buffer_t buffer;
-} sgx_arch_enclave_css_t;
-static_assert(sizeof(sgx_arch_enclave_css_t) == 1808, "incorrect struct size");
+    uint8_t              reserved4[12];
+    uint8_t              q1[SE_KEY_SIZE];
+    uint8_t              q2[SE_KEY_SIZE];
+} sgx_sigstruct_t;
+static_assert(sizeof(sgx_sigstruct_t) == 1808, "incorrect struct size");
 
 typedef struct _sgx_key_id_t {
     uint8_t id[SGX_KEYID_SIZE];
@@ -337,7 +355,8 @@ typedef struct _sgx_report_data_t {
 typedef struct _report_body_t {
     sgx_cpu_svn_t        cpu_svn;
     sgx_misc_select_t    misc_select;
-    uint8_t              reserved1[12];
+    uint8_t              cet_attributes;
+    uint8_t              reserved1[11];
     sgx_isvext_prod_id_t isv_ext_prod_id;
     sgx_attributes_t     attributes;
     sgx_measurement_t    mr_enclave;
@@ -362,10 +381,11 @@ typedef struct _report_t {
 #define SGX_REPORT_SIGNED_SIZE 384
 #define SGX_REPORT_ACTUAL_SIZE 432
 
-typedef struct _target_info_t {
+typedef struct {
     sgx_measurement_t mr_enclave;
     sgx_attributes_t  attributes;
-    uint8_t           reserved1[2];
+    uint8_t           cet_attributes;
+    uint8_t           reserved1;
     sgx_config_svn_t  config_svn;
     sgx_misc_select_t misc_select;
     uint8_t           reserved2[8];
@@ -393,25 +413,26 @@ static_assert(sizeof(sgx_key_request_t) == 512, "incorrect struct size");
 
 typedef uint8_t sgx_key_128bit_t[16];
 
-#define ENCLU ".byte 0x0f, 0x01, 0xd7"
+static inline int enclu(uint32_t eax, uint64_t rbx, uint64_t rcx, uint64_t rdx) {
+    __asm__ volatile (
+        "enclu"
+        : "+a"(eax)
+        : "b"(rbx), "c"(rcx), "d"(rdx)
+        : "memory", "cc"
+    );
+    return (int)eax;
+}
 
-#else /* !__ASSEMBLER__ */
+#endif /* !__ASSEMBLER__ */
 
-/* microcode to call ENCLU */
-.macro ENCLU
-    .byte 0x0f, 0x01, 0xd7
-.endm
-
-#endif
-
-#define EENTER  2
-#define ERESUME 3
-#define EDBGRD  4
-#define EDBGWR  5
-
-#define EREPORT 0
-#define EGETKEY 1
-#define EEXIT   4
+#define EREPORT     0
+#define EGETKEY     1
+#define EENTER      2
+#define ERESUME     3
+#define EEXIT       4
+#define EACCEPT     5
+#define EMODPE      6
+#define EACCEPTCOPY 7
 
 #define SGX_LAUNCH_KEY         0
 #define SGX_PROVISION_KEY      1

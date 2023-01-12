@@ -33,6 +33,7 @@
 extern struct pal_linuxsgx_state {
     /* enclave information */
     bool enclave_initialized;        /* thread creation ECALL is allowed only after this is set */
+    bool edmm_enabled;
     sgx_target_info_t qe_targetinfo; /* received from untrusted host, use carefully */
     sgx_report_body_t enclave_info;  /* cached self-report result, trusted */
 
@@ -66,12 +67,12 @@ int init_child_process(int parent_stream_fd, PAL_HANDLE* out_parent, uint64_t* o
 #ifdef IN_ENCLAVE
 
 extern const size_t g_page_size;
-extern size_t g_pal_internal_mem_size;
 
 noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void* uptr_args,
                              size_t args_size, void* uptr_env, size_t env_size,
                              int parent_stream_fd, void* uptr_qe_targetinfo, void* uptr_topo_info,
-                             void* uptr_rpc_queue, void* uptr_dns_conf);
+                             void* uptr_rpc_queue, void* uptr_dns_conf, bool edmm_enabled,
+                             void* urts_reserved_mem_ranges, size_t urts_reserved_mem_ranges_size);
 void pal_start_thread(void);
 
 extern char __text_start, __text_end, __data_start, __data_end;
@@ -95,7 +96,7 @@ void restore_xregs(const PAL_XREGS_STATE* xsave_area);
 noreturn void _restore_sgx_context(sgx_cpu_context_t* uc, PAL_XREGS_STATE* xsave_area);
 
 void _PalExceptionHandler(unsigned int exit_info, sgx_cpu_context_t* uc,
-                          PAL_XREGS_STATE* xregs_state);
+                          PAL_XREGS_STATE* xregs_state, sgx_arch_exinfo_t* exinfo);
 /* `event_` is actually of `enum pal_event` type, but we call it from assembly, so we need to know
  * its underlying type. */
 void _PalHandleExternalEvent(long event_, sgx_cpu_context_t* uc, PAL_XREGS_STATE* xregs_state);
@@ -108,9 +109,17 @@ int init_cpuid(void);
 
 int init_enclave(void);
 
+int init_reserved_ranges(void* urts_ptr, size_t urts_size);
+
 /* master key for all enclaves of one application, populated by the first enclave and inherited by
  * all other enclaves (children, their children, etc.); used as master key in pipes' encryption */
 extern PAL_SESSION_KEY g_master_key;
+
+/*!
+ * \brief Fill sgx_target_info_t with information from sgx_report_body_t
+ */
+void sgx_report_body_to_target_info(const sgx_report_body_t* report_body,
+                                    sgx_target_info_t* out_target_info);
 
 /*
  * sgx_verify_report: verify a CPU-signed report from another local enclave

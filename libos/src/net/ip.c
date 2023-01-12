@@ -256,17 +256,47 @@ static int set_tcp_option(struct libos_handle* handle, int optname, void* optval
     }
     assert(attr.handle_type == PAL_TYPE_SOCKET);
 
-    if (len < sizeof(int)) {
-        /* All currently supported options use `int`. */
+    /* All currently supported options use `int`. */
+    size_t required_len = sizeof(int);
+    if (len < required_len) {
         return -EINVAL;
     }
 
+    union {
+        int i;
+    } value = { 0 };
+    memcpy(&value, optval, required_len);
+
     switch (optname) {
         case TCP_CORK:
-            attr.socket.tcp_cork = *(int*)optval;
+            attr.socket.tcp_cork = value.i;
+            break;
+        case TCP_KEEPIDLE:
+            if (value.i < 1 || value.i > MAX_TCP_KEEPIDLE) {
+                return -EINVAL;
+            }
+            attr.socket.tcp_keepidle = value.i;
+            break;
+        case TCP_KEEPINTVL:
+            if (value.i < 1 || value.i > MAX_TCP_KEEPINTVL) {
+                return -EINVAL;
+            }
+            attr.socket.tcp_keepintvl = value.i;
+            break;
+        case TCP_KEEPCNT:
+            if (value.i < 1 || value.i > MAX_TCP_KEEPCNT) {
+                return -EINVAL;
+            }
+            attr.socket.tcp_keepcnt = value.i;
             break;
         case TCP_NODELAY:
-            attr.socket.tcp_nodelay = *(int*)optval;
+            attr.socket.tcp_nodelay = value.i;
+            break;
+        case TCP_USER_TIMEOUT:
+            if (value.i < 0) {
+                return -EINVAL;
+            }
+            attr.socket.tcp_user_timeout = value.i;
             break;
         default:
             return -ENOPROTOOPT;
@@ -358,6 +388,9 @@ static int set_socket_option(struct libos_handle* handle, int optname, void* opt
         case SO_REUSEADDR:
             required_len = sizeof(int);
             break;
+        case SO_REUSEPORT:
+            required_len = sizeof(int);
+            break;
         case SO_BROADCAST:
             required_len = sizeof(int);
             break;
@@ -426,6 +459,9 @@ static int set_socket_option(struct libos_handle* handle, int optname, void* opt
         case SO_REUSEADDR:
             attr.socket.reuseaddr = value.i;
             break;
+        case SO_REUSEPORT:
+            attr.socket.reuseport = value.i;
+            break;
         case SO_BROADCAST:
             if (sock->type == SOCK_STREAM) {
                 /* This option has no effect on stream-oriented sockets. */
@@ -446,6 +482,9 @@ static int set_socket_option(struct libos_handle* handle, int optname, void* opt
     switch (optname) {
         case SO_REUSEADDR:
             sock->reuseaddr = attr.socket.reuseaddr;
+            break;
+        case SO_REUSEPORT:
+            sock->reuseport = attr.socket.reuseport;
             break;
         case SO_BROADCAST:
             sock->broadcast = attr.socket.broadcast;
@@ -501,8 +540,20 @@ static int get_tcp_option(struct libos_handle* handle, int optname, void* optval
         case TCP_CORK:
             val = attr.socket.tcp_cork;
             break;
+        case TCP_KEEPIDLE:
+            val = attr.socket.tcp_keepidle;
+            break;
+        case TCP_KEEPINTVL:
+            val = attr.socket.tcp_keepintvl;
+            break;
+        case TCP_KEEPCNT:
+            val = attr.socket.tcp_keepcnt;
+            break;
         case TCP_NODELAY:
             val = attr.socket.tcp_nodelay;
+            break;
+        case TCP_USER_TIMEOUT:
+            val = attr.socket.tcp_user_timeout;
             break;
         default:
             return -ENOPROTOOPT;
@@ -652,19 +703,9 @@ static int send(struct libos_handle* handle, struct iovec* iov, size_t iov_len, 
         linux_to_pal_sockaddr(addr, &pal_ip_addr);
     }
 
-    struct pal_iovec* pal_iov = malloc(iov_len * sizeof(*pal_iov));
-    if (!pal_iov) {
-        return -ENOMEM;
-    }
-    for (size_t i = 0; i < iov_len; i++) {
-        pal_iov[i].iov_base = iov[i].iov_base;
-        pal_iov[i].iov_len = iov[i].iov_len;
-    }
-
-    int ret = PalSocketSend(sock->pal_handle, pal_iov, iov_len, out_size,
-                            addr ? &pal_ip_addr : NULL, force_nonblocking);
+    int ret = PalSocketSend(sock->pal_handle, iov, iov_len, out_size, addr ? &pal_ip_addr : NULL,
+                            force_nonblocking);
     ret = (ret == -PAL_ERROR_TOOLONG) ? -EMSGSIZE : pal_to_unix_errno(ret);
-    free(pal_iov);
     return ret;
 }
 
@@ -684,19 +725,9 @@ static int recv(struct libos_handle* handle, struct iovec* iov, size_t iov_len,
             __builtin_unreachable();
     }
 
-    struct pal_iovec* pal_iov = malloc(iov_len * sizeof(*pal_iov));
-    if (!pal_iov) {
-        return -ENOMEM;
-    }
-    for (size_t i = 0; i < iov_len; i++) {
-        pal_iov[i].iov_base = iov[i].iov_base;
-        pal_iov[i].iov_len = iov[i].iov_len;
-    }
-
     struct pal_socket_addr pal_ip_addr;
-    int ret = PalSocketRecv(handle->info.sock.pal_handle, pal_iov, iov_len, out_total_size,
+    int ret = PalSocketRecv(handle->info.sock.pal_handle, iov, iov_len, out_total_size,
                             addr ? &pal_ip_addr : NULL, force_nonblocking);
-    free(pal_iov);
     if (ret < 0) {
         return pal_to_unix_errno(ret);
     }

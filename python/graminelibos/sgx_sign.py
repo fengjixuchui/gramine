@@ -92,7 +92,7 @@ def get_enclave_attributes(manifest_sgx):
     }
 
     miscs_dict = {
-        'support_exinfo': offs.SGX_MISCSELECT_EXINFO,
+        'require_exinfo': offs.SGX_MISCSELECT_EXINFO,
     }
 
     flags = collect_bits(manifest_sgx, flags_dict)
@@ -163,17 +163,17 @@ def get_memory_areas(attr, libpal):
     areas = []
     areas.append(
         MemoryArea('ssa',
-                   size=attr['thread_num'] * offs.SSA_FRAME_SIZE * offs.SSA_FRAME_NUM,
+                   size=attr['max_threads'] * offs.SSA_FRAME_SIZE * offs.SSA_FRAME_NUM,
                    flags=PAGEINFO_R | PAGEINFO_W | PAGEINFO_REG))
-    areas.append(MemoryArea('tcs', size=attr['thread_num'] * offs.TCS_SIZE,
+    areas.append(MemoryArea('tcs', size=attr['max_threads'] * offs.TCS_SIZE,
                             flags=PAGEINFO_TCS))
-    areas.append(MemoryArea('tls', size=attr['thread_num'] * offs.PAGESIZE,
+    areas.append(MemoryArea('tls', size=attr['max_threads'] * offs.PAGESIZE,
                             flags=PAGEINFO_R | PAGEINFO_W | PAGEINFO_REG))
 
-    for _ in range(attr['thread_num']):
+    for _ in range(attr['max_threads']):
         areas.append(MemoryArea('stack', size=offs.ENCLAVE_STACK_SIZE,
                                 flags=PAGEINFO_R | PAGEINFO_W | PAGEINFO_REG))
-    for _ in range(attr['thread_num']):
+    for _ in range(attr['max_threads']):
         areas.append(MemoryArea('sig_stack', size=offs.ENCLAVE_SIG_STACK_SIZE,
                                 flags=PAGEINFO_R | PAGEINFO_W | PAGEINFO_REG))
 
@@ -234,7 +234,7 @@ def gen_area_content(attr, areas, enclave_base, enclave_heap_min):
         elif area.desc != 'free':
             raise ValueError('Unexpected memory area is in heap range')
 
-    for t in range(0, attr['thread_num']):
+    for t in range(0, attr['max_threads']):
         ssa = ssa_area.addr + offs.SSA_FRAME_SIZE * offs.SSA_FRAME_NUM * t
         ssa_offset = ssa - enclave_base
         set_tcs_field(t, offs.TCS_OSSA, '<Q', ssa_offset)
@@ -275,6 +275,12 @@ def populate_memory_areas(attr, areas, enclave_base, enclave_heap_min):
             raise Exception('Enclave size is not large enough')
         last_populated_addr = area.addr
 
+    gen_area_content(attr, areas, enclave_base, enclave_heap_min)
+
+    # Enclaves with EDMM do not add "free" memory at startup.
+    if attr['edmm_enable']:
+        return areas
+
     free_areas = []
     for area in areas:
         addr = area.addr + area.size
@@ -291,8 +297,6 @@ def populate_memory_areas(attr, areas, enclave_base, enclave_heap_min):
             MemoryArea('free', addr=enclave_heap_min,
                        size=last_populated_addr - enclave_heap_min, flags=flags,
                        measure=False))
-
-    gen_area_content(attr, areas, enclave_base, enclave_heap_min)
 
     return areas + free_areas
 
@@ -442,7 +446,8 @@ def get_mrenclave_and_manifest(manifest_path, libpal, verbose=False):
     manifest_sgx = manifest['sgx']
     attr = {
         'enclave_size': parse_size(manifest_sgx['enclave_size']),
-        'thread_num': manifest_sgx['thread_num'],
+        'edmm_enable': manifest_sgx.get('edmm_enable', False),
+        'max_threads': manifest_sgx.get('max_threads', manifest_sgx.get('thread_num')),
         'isv_prod_id': manifest_sgx['isvprodid'],
         'isv_svn': manifest_sgx['isvsvn'],
     }
@@ -451,7 +456,8 @@ def get_mrenclave_and_manifest(manifest_path, libpal, verbose=False):
     if verbose:
         print('Attributes:')
         print(f'    size:        {attr["enclave_size"]:#x}')
-        print(f'    thread_num:  {attr["thread_num"]}')
+        print(f'    edmm:        {attr["edmm_enable"]}')
+        print(f'    max_threads: {attr["max_threads"]}')
         print(f'    isv_prod_id: {attr["isv_prod_id"]}')
         print(f'    isv_svn:     {attr["isv_svn"]}')
         print(f'    attr.flags:  {attr["flags"]:#x}')

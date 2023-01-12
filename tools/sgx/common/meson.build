@@ -1,4 +1,4 @@
-sgx_util = shared_library('sgx_util',
+sgx_util = static_library('sgx_util',
     'ias.c',
     'ias.h',
     'pf_util.c',
@@ -13,11 +13,12 @@ sgx_util = shared_library('sgx_util',
     ],
 
     include_directories: [
-        sgx_inc,
+        pal_sgx_inc, # this is only for `sgx_arch.h` and `sgx_attest.h`
         common_inc,
     ],
     dependencies: [
         cjson_dep,
+        common_utils_dep,
         libcurl_dep,
         protected_files_dep,
         mbedtls_static_dep,
@@ -31,20 +32,7 @@ sgx_util_dep = declare_dependency(
     link_with: sgx_util,
     include_directories: [
         include_directories('.'),
-        sgx_inc, # this is mostly for sgx_arch.h
+        pal_sgx_inc, # this is only for `sgx_arch.h` and `sgx_attest.h`
         protected_files_inc,
     ],
 )
-
-pkgconfig.generate(
-    sgx_util,
-    libraries: [
-        '-Wl,-rpath,${libdir}',
-        sgx_util,
-    ],
-)
-
-meson.add_install_script('/bin/sh', '-c',
-    'ln -sf ../../../libsgx_util.so ' +
-    '"$MESON_INSTALL_DESTDIR_PREFIX"/@0@/gramine/runtime/glibc/'.format(
-        get_option('libdir')))

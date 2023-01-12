@@ -63,10 +63,14 @@ static noreturn void libos_clean_and_exit(int exit_code) {
 }
 
 noreturn void thread_exit(int error_code, int term_signal) {
+    struct libos_thread* cur_thread = get_cur_thread();
+    if (cur_thread->robust_list) {
+        release_robust_list(cur_thread->robust_list);
+        cur_thread->robust_list = NULL;
+    }
+
     /* Remove current thread from the threads list. */
     if (!check_last_thread(/*mark_self_dead=*/true)) {
-        struct libos_thread* cur_thread = get_cur_thread();
-
         /* ask async worker thread to cleanup this thread */
         cur_thread->clear_child_tid_pal = 1; /* any non-zero value suffices */
         /* We pass this ownership to `cleanup_thread`. */
@@ -82,7 +86,7 @@ noreturn void thread_exit(int error_code, int term_signal) {
 
         if (ret < 0) {
             log_error("failed to set up async cleanup_thread (exiting without clear child tid),"
-                      " return code: %ld", ret);
+                      " return code: %s", unix_strerror(ret));
             /* `cleanup_thread` did not get this reference, clean it. We have to be careful, as
              * this is most likely the last reference and will free this `cur_thread`. */
             put_thread(cur_thread);
@@ -98,14 +102,14 @@ noreturn void thread_exit(int error_code, int term_signal) {
      * should already be gone. */
     int ret = posix_lock_clear_pid(g_process.pid);
     if (ret < 0)
-        log_warning("error clearing POSIX locks: %d", ret);
+        log_warning("error clearing POSIX locks: %s", unix_strerror(ret));
 
     detach_all_fds();
 
     /* This is the last thread of the process. Let parent know we exited. */
     ret = ipc_cld_exit_send(error_code, term_signal);
     if (ret < 0) {
-        log_error("Sending IPC process-exit notification failed: %d", ret);
+        log_error("Sending IPC process-exit notification failed: %s", unix_strerror(ret));
     }
 
     /* At this point other threads might be still in the middle of an exit routine, but we don't

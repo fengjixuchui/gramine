@@ -62,6 +62,9 @@ static int generic_istat(struct libos_inode* inode, struct stat* buf) {
     lock(&inode->lock);
     buf->st_mode = inode->type | inode->perm;
     buf->st_size = inode->size;
+    buf->st_uid  = inode->uid;
+    buf->st_gid  = inode->gid;
+
     /* Some programs (e.g. some tests from LTP) require this value. We've picked some random,
      * pretty looking constant - exact value should not affect anything (perhaps except
      * performance). */
@@ -113,27 +116,16 @@ file_off_t generic_inode_seek(struct libos_handle* hdl, file_off_t offset, int o
     return ret;
 }
 
-int generic_inode_poll(struct libos_handle* hdl, int poll_type) {
+int generic_inode_poll(struct libos_handle* hdl, int in_events, int* out_events) {
     int ret;
-
-    lock(&hdl->pos_lock);
-    lock(&hdl->inode->lock);
 
     if (hdl->inode->type == S_IFREG) {
         ret = 0;
-        if (poll_type & FS_POLL_WR)
-            ret |= FS_POLL_WR;
-        /* TODO: The `hdl->pos < hdl->inode->size` condition is wrong, the `poll` syscall treats
-         * end-of-file as readable. Check if removing this condition doesn't break anything
-         * in our `poll` implementation. */
-        if ((poll_type & FS_POLL_RD) && hdl->pos < hdl->inode->size)
-            ret |= FS_POLL_RD;
+        *out_events = in_events & (POLLIN | POLLRDNORM | POLLOUT | POLLWRNORM);
     } else {
         ret = -EAGAIN;
     }
 
-    unlock(&hdl->inode->lock);
-    unlock(&hdl->pos_lock);
     return ret;
 }
 
@@ -146,12 +138,9 @@ int generic_emulated_mmap(struct libos_handle* hdl, void* addr, size_t size, int
     pal_prot_flags_t pal_prot = LINUX_PROT_TO_PAL(prot, flags);
     pal_prot_flags_t pal_prot_writable = pal_prot | PAL_PROT_WRITE;
 
-    void* actual_addr = addr;
-    ret = PalVirtualMemoryAlloc(&actual_addr, size, /*alloc_type=*/0, pal_prot_writable);
+    ret = PalVirtualMemoryAlloc(addr, size, pal_prot_writable);
     if (ret < 0)
         return pal_to_unix_errno(ret);
-
-    assert(actual_addr == addr);
 
     size_t read_size = size;
     char* read_addr = addr;
@@ -186,7 +175,8 @@ int generic_emulated_mmap(struct libos_handle* hdl, void* addr, size_t size, int
 err:;
     int free_ret = PalVirtualMemoryFree(addr, size);
     if (free_ret < 0) {
-        log_debug("%s: PalVirtualMemoryFree failed on cleanup: %d", __func__, free_ret);
+        log_debug("%s: PalVirtualMemoryFree failed on cleanup: %s", __func__,
+                  pal_strerror(free_ret));
         BUG();
     }
     return ret;
@@ -239,7 +229,8 @@ out:
     if (pal_prot != pal_prot_readable) {
         int protect_ret = PalVirtualMemoryProtect(addr, size, pal_prot);
         if (protect_ret < 0) {
-            log_debug("%s: PalVirtualMemoryProtect failed on cleanup: %d", __func__, protect_ret);
+            log_debug("%s: PalVirtualMemoryProtect failed on cleanup: %s", __func__,
+                      pal_strerror(protect_ret));
             BUG();
         }
     }

@@ -7,11 +7,10 @@
 
 #pragma once
 
-#include <sys/syscall.h>
-
 #include "api.h"
 #include "host_syscall.h"
 #include "pal_linux.h"
+#include "sgx_arch.h"
 #include "toml.h"
 
 extern const size_t g_page_size;
@@ -48,6 +47,7 @@ struct pal_enclave {
     unsigned long rpc_thread_num;
     unsigned long ssa_frame_size;
     bool nonpie_binary;
+    bool edmm_enabled;
     enum sgx_attestation_type attestation_type;
     char* libpal_uri; /* Path to the PAL binary */
 
@@ -63,17 +63,20 @@ struct pal_enclave {
 
 extern struct pal_enclave g_pal_enclave;
 
-int open_sgx_driver(bool need_gsgx);
+int open_sgx_driver(void);
 bool is_wrfsbase_supported(void);
 
 int read_enclave_token(int token_file, sgx_arch_token_t* token);
-int read_enclave_sigstruct(int sigfile, sgx_arch_enclave_css_t* sig);
+int read_enclave_sigstruct(int sigfile, sgx_sigstruct_t* sig);
 
 int create_enclave(sgx_arch_secs_t* secs, sgx_arch_token_t* token);
 
-enum sgx_page_type { SGX_PAGE_SECS, SGX_PAGE_TCS, SGX_PAGE_REG };
 int add_pages_to_enclave(sgx_arch_secs_t* secs, void* addr, void* user_addr, unsigned long size,
                          enum sgx_page_type type, int prot, bool skip_eextend, const char* comment);
+
+int edmm_restrict_pages_perm(uint64_t addr, size_t count, uint64_t prot);
+int edmm_modify_pages_type(uint64_t addr, size_t count, uint64_t type);
+int edmm_remove_pages(uint64_t addr, size_t count);
 
 /*!
  * \brief Retrieve Quoting Enclave's sgx_target_info_t by talking to AESMD.
@@ -102,7 +105,7 @@ int init_quoting_enclave_targetinfo(bool is_epid, sgx_target_info_t* qe_targetin
 int retrieve_quote(const sgx_spid_t* spid, bool linkable, const sgx_report_t* report,
                    const sgx_quote_nonce_t* nonce, char** quote, size_t* quote_len);
 
-int init_enclave(sgx_arch_secs_t* secs, sgx_arch_enclave_css_t* sigstruct, sgx_arch_token_t* token);
+int init_enclave(sgx_arch_secs_t* secs, sgx_sigstruct_t* sigstruct, sgx_arch_token_t* token);
 
 int sgx_ecall(long ecall_no, void* ms);
 int sgx_raise(int event);
@@ -121,7 +124,6 @@ void unmap_tcs(void);
 int current_enclave_thread_cnt(void);
 void thread_exit(int status);
 
-int sgx_init_child_process(int parent_stream_fd, char** out_application_path, char** out_manifest);
 int sgx_signal_setup(void);
 int block_async_signals(bool block);
 

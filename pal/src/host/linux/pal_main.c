@@ -34,12 +34,6 @@ char* g_libpal_path = NULL;
 
 struct pal_linux_state g_pal_linux_state;
 
-/* for internal PAL objects, Gramine first uses pre-allocated g_mem_pool and then falls back to
- * _PalVirtualMemoryAlloc(PAL_ALLOC_INTERNAL); the amount of available PAL internal memory is
- * limited by the variable below */
-size_t g_pal_internal_mem_size = 0;
-char* g_pal_internal_mem_addr = NULL;
-
 const size_t g_page_size = PRESET_PAGESIZE;
 
 static void read_info_from_stack(void* initial_rsp, int* out_argc, const char*** out_argv,
@@ -86,36 +80,12 @@ static void read_info_from_stack(void* initial_rsp, int* out_argc, const char***
     *out_envp = envp;
 }
 
-void _PalGetAvailableUserAddressRange(void** out_start, void** out_end) {
-    void* end_addr = (void*)ALLOC_ALIGN_DOWN_PTR(TEXT_START);
-    void* start_addr = (void*)MMAP_MIN_ADDR;
-
-    assert(IS_ALLOC_ALIGNED_PTR(start_addr) && IS_ALLOC_ALIGNED_PTR(end_addr));
-
-    while (1) {
-        if (start_addr >= end_addr)
-            INIT_FAIL("no user memory available");
-
-        void* mem = (void*)DO_SYSCALL(mmap, start_addr, g_pal_public_state.alloc_align, PROT_NONE,
-                                      MAP_FIXED | MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-        if (!IS_PTR_ERR(mem)) {
-            DO_SYSCALL(munmap, mem, g_pal_public_state.alloc_align);
-            if (mem == start_addr)
-                break;
-        }
-
-        start_addr = (void*)((unsigned long)start_addr << 1);
-    }
-
-    *out_end   = end_addr;
-    *out_start = start_addr;
-}
-
 noreturn static void print_usage_and_exit(const char* argv_0) {
     const char* self = argv_0 ?: "<this program>";
     log_always("USAGE:\n"
                "\tFirst process: %s <path to libpal.so> init <application> args...\n"
-               "\tChildren:      %s <path to libpal.so> child <parent_stream_fd> args...",
+               "\tChildren:      %s <path to libpal.so> child <parent_stream_fd> "
+               "<reserved_mem_ranges_fd> args...",
                self, self);
     log_always("This is an internal interface. Use gramine-direct wrapper to launch applications "
                "in Gramine.");
@@ -181,12 +151,12 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     /* relocate PAL */
     ret = setup_pal_binary();
     if (ret < 0)
-        INIT_FAIL("Relocation of the PAL binary failed: %d", ret);
+        INIT_FAIL("Relocation of the PAL binary failed: %s", pal_strerror(ret));
 
     uint64_t start_time;
     ret = _PalSystemTimeQuery(&start_time);
     if (ret < 0)
-        INIT_FAIL("_PalSystemTimeQuery() failed: %d", ret);
+        INIT_FAIL("_PalSystemTimeQuery() failed: %s", pal_strerror(ret));
 
     call_init_array();
 
@@ -194,9 +164,19 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     g_pal_public_state.alloc_align = g_page_size;
     assert(IS_POWER_OF_2(g_pal_public_state.alloc_align));
 
+    /* Force stack to grow for at least `THREAD_STACK_SIZE`. `init_memory_bookkeeping()` below
+     * requires the stack to be fully present and visible in "/proc/self/maps". */
+    static_assert(THREAD_STACK_SIZE % PAGE_SIZE == 0, "");
+    probe_stack(THREAD_STACK_SIZE / PAGE_SIZE);
+
+    ret = init_memory_bookkeeping();
+    if (ret < 0) {
+        INIT_FAIL("init_memory_bookkeeping failed: %s", pal_strerror(ret));
+    }
+
     ret = init_random();
     if (ret < 0)
-        INIT_FAIL("init_random() failed: %d", ret);
+        INIT_FAIL("init_random() failed: %s", pal_strerror(ret));
 
     int argc;
     const char** argv;
@@ -216,10 +196,12 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
         print_usage_and_exit(argv[0]);
     }
 
+    g_pal_linux_state.host_environ = envp;
+
     if (first_process) {
         ret = DO_SYSCALL(personality, 0xffffffffu);
         if (ret < 0) {
-            INIT_FAIL("retrieving personality failed: %d", unix_to_pal_error(ret));
+            INIT_FAIL("retrieving personality failed: %s", unix_strerror(ret));
         }
         if (!(ret & ADDR_NO_RANDOMIZE)) {
             /* Gramine fork() emulation does fork()+execve() on host and then sends all necessary
@@ -227,10 +209,10 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
              * colliding with PAL executable (as it would get a new random address in the child). */
             ret = DO_SYSCALL(personality, (unsigned int)ret | ADDR_NO_RANDOMIZE);
             if (ret < 0) {
-                INIT_FAIL("setting personality failed: %d", unix_to_pal_error(ret));
+                INIT_FAIL("setting personality failed: %s", unix_strerror(ret));
             }
             ret = DO_SYSCALL(execve, "/proc/self/exe", argv, envp);
-            INIT_FAIL("execve to disable ASLR failed: %d", unix_to_pal_error(ret));
+            INIT_FAIL("execve to disable ASLR failed: %s", unix_strerror(ret));
         }
 
 #ifdef __x86_64__
@@ -239,45 +221,26 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
          * unconditionally. For more details, see similar code in Linux-SGX PAL. */
         ret = DO_SYSCALL(arch_prctl, ARCH_REQ_XCOMP_PERM, AMX_TILEDATA);
         if (ret < 0 && ret != -EINVAL && ret != -EOPNOTSUPP && ret != -ENOSYS) {
-            INIT_FAIL("Requesting AMX permission failed: %d", unix_to_pal_error(ret));
+            INIT_FAIL("Requesting AMX permission failed: %s", unix_strerror(ret));
         }
 #endif
-
+    } else {
+        if (argc < 5) {
+            print_usage_and_exit(argv[0]);
+        }
+        int reserved_mem_ranges_fd = atoi(argv[4]);
+        ret = init_reserved_ranges(reserved_mem_ranges_fd);
+        if (ret < 0) {
+            INIT_FAIL("init_reserved_ranges failed: %s", pal_strerror(ret));
+        }
     }
 
-    g_pal_linux_state.host_environ = envp;
-
-    /* Prepare an initial memory pool for the slab allocator. This is necessary because we cannot
-     * allocate the PAL-internal range yet: we need to parse the manifest to know its size. */
-    size_t init_pool_size = PAL_INITIAL_MEM_SIZE;
-    void* init_pool_addr = (void*)DO_SYSCALL(mmap, /*addr=*/NULL, init_pool_size,
-                                             PROT_READ | PROT_WRITE,
-                                             MAP_ANONYMOUS | MAP_PRIVATE, /*fd=*/-1, /*offset=*/0);
-    if (IS_PTR_ERR(init_pool_addr)) {
-        INIT_FAIL("Cannot allocate initial memory pool");
-    }
-
-    init_slab_mgr(init_pool_addr, init_pool_size);
-
-    ret = add_preloaded_range((uintptr_t)init_pool_addr,
-                              (uintptr_t)init_pool_addr + init_pool_size,
-                              "pal_init_pool");
-    if (ret < 0) {
-        INIT_FAIL("Out of memory");
-    }
-
-#ifdef ASAN
-    ret = add_preloaded_range(ASAN_SHADOW_START, ASAN_SHADOW_START + ASAN_SHADOW_LENGTH,
-                              "asan_shadow");
-    if (ret < 0) {
-        INIT_FAIL("Out of memory");
-    }
-#endif
+    init_slab_mgr();
 
 #ifdef DEBUG
     ret = debug_map_init_from_proc_maps();
     if (ret < 0)
-        INIT_FAIL("failed to init debug maps: %d", unix_to_pal_error(ret));
+        INIT_FAIL("failed to init debug maps: %s", unix_strerror(ret));
 #endif
 
     /* Get host topology information only for the first process. This information will be
@@ -285,7 +248,7 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     if (first_process) {
         ret = get_topology_info(&g_pal_public_state.topo_info);
         if (ret < 0)
-            INIT_FAIL("get_topology_info() failed: %d", ret);
+            INIT_FAIL("get_topology_info() failed: %s", unix_strerror(ret));
     }
 
     g_pal_loader_path = get_main_exec_path();
@@ -311,7 +274,7 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     pal_linux_tcb_init(tcb, first_thread, alt_stack, /*callback=*/NULL, /*param=*/NULL);
     ret = pal_thread_init(tcb);
     if (ret < 0)
-        INIT_FAIL("pal_thread_init() failed: %d", unix_to_pal_error(ret));
+        INIT_FAIL("pal_thread_init() failed: %s", unix_strerror(ret));
 
     bool disable_vdso = false;
 #ifdef __x86_64__
@@ -345,39 +308,7 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     if (sysinfo_ehdr && !disable_vdso) {
         ret = setup_vdso(sysinfo_ehdr);
         if (ret < 0)
-            INIT_FAIL("Setup of VDSO failed: %d", ret);
-    }
-
-    uintptr_t vdso_start = 0;
-    uintptr_t vdso_end = 0;
-    uintptr_t vvar_start = 0;
-    uintptr_t vvar_end = 0;
-    ret = get_vdso_and_vvar_ranges(&vdso_start, &vdso_end, &vvar_start, &vvar_end);
-    if (ret < 0) {
-        INIT_FAIL("getting vdso and vvar ranges failed: %d", ret);
-    }
-
-    if (vdso_start || vdso_end) {
-        /* Override the range retrieved by parsing vdso: the actual mapped range might be bigger. */
-        g_vdso_start = vdso_start;
-        g_vdso_end = vdso_end;
-    }
-
-    if (g_vdso_start || g_vdso_end) {
-        ret = add_preloaded_range(g_vdso_start, g_vdso_end, "vdso");
-        if (ret < 0) {
-            INIT_FAIL("Out of memory");
-        }
-    } else {
-        INIT_FAIL("vdso address range not preloaded, is your system missing vdso?!");
-    }
-    if (vvar_start || vvar_end) {
-        ret = add_preloaded_range(vvar_start, vvar_end, "vvar");
-        if (ret < 0) {
-            INIT_FAIL("Out of memory");
-        }
-    } else {
-        log_warning("vvar address range not preloaded, is your system missing vvar?!");
+            INIT_FAIL("Setup of VDSO failed: %s", pal_strerror(ret));
     }
 
     g_pal_linux_state.host_pid = DO_SYSCALL(getpid);
@@ -393,15 +324,15 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
 
         ret = read_text_file_to_cstr(manifest_path, &manifest);
         if (ret < 0) {
-            INIT_FAIL("Reading manifest failed: %d", unix_to_pal_error(ret));
+            INIT_FAIL("Reading manifest failed: %s", unix_strerror(ret));
         }
     } else {
         // Children receive their argv and config via IPC.
         int parent_stream_fd = atoi(argv[3]);
         ret = DO_SYSCALL(fcntl, parent_stream_fd, F_SETFD, FD_CLOEXEC);
         if (ret < 0) {
-            INIT_FAIL("Failed to set `CLOEXEC` flag on `parent_stream_fd`: %d",
-                      unix_to_pal_error(ret));
+            INIT_FAIL("Failed to set `CLOEXEC` flag on `parent_stream_fd`: %s",
+                      unix_strerror(ret));
         }
         init_child_process(parent_stream_fd, &parent, &manifest, &instance_id);
     }
@@ -418,12 +349,6 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
     if (!g_pal_public_state.manifest_root)
         INIT_FAIL_MANIFEST(errbuf);
 
-    ret = toml_sizestring_in(g_pal_public_state.manifest_root, "loader.pal_internal_mem_size",
-                             /*defaultval=*/g_page_size, &g_pal_internal_mem_size);
-    if (ret < 0) {
-        INIT_FAIL("Cannot parse 'loader.pal_internal_mem_size'");
-    }
-
     ret = toml_bool_in(g_pal_public_state.manifest_root,
                        "sys.enable_extra_runtime_domain_names_conf", /*defaultval=*/false,
                        &g_pal_public_state.extra_runtime_domain_names_conf);
@@ -437,21 +362,6 @@ noreturn void pal_linux_main(void* initial_rsp, void* fini_callback) {
         get_host_etc_configs();
     }
 
-    void* internal_mem_addr = (void*)DO_SYSCALL(mmap, NULL, g_pal_internal_mem_size,
-                                                PROT_READ | PROT_WRITE,
-                                                MAP_ANONYMOUS | MAP_PRIVATE, -1, 0);
-    if (IS_PTR_ERR(internal_mem_addr)) {
-        INIT_FAIL("Cannot allocate PAL internal memory pool");
-    }
-
-    ret = add_preloaded_range((uintptr_t)internal_mem_addr,
-                              (uintptr_t)internal_mem_addr + g_pal_internal_mem_size,
-                              "pal_internal_mem");
-    if (ret < 0) {
-        INIT_FAIL("Out of memory");
-    }
-    g_pal_internal_mem_addr = internal_mem_addr;
-
     /* call to main function */
-    pal_main(instance_id, parent, first_thread, first_process ? argv + 3 : argv + 4, envp);
+    pal_main(instance_id, parent, first_thread, first_process ? argv + 3 : argv + 5, envp);
 }

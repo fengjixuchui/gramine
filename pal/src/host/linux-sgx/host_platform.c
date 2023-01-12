@@ -8,7 +8,7 @@
 #include <stdbool.h>
 
 #include "aesm.pb-c.h"
-#include "host_gsgx.h"
+#include "host_sgx_driver.h"
 #include "host_internal.h"
 #include "host_log.h"
 #include "linux_utils.h"
@@ -124,8 +124,9 @@ out:
     free(res_buf);
     DO_SYSCALL(close, aesm_socket);
     if (ret < 0) {
-        log_error("Cannot communicate with AESM service (read/write returned error %d).\n"
-                  "Please check its status! (`service aesmd status` on Ubuntu)", ret);
+        log_error("Cannot communicate with AESM service (read/write failed: %s).\n"
+                  "Please check its status! (`service aesmd status` on Ubuntu)",
+                  unix_strerror(ret));
     }
     return ret;
 }

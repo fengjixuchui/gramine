@@ -265,7 +265,7 @@ static int execute_loadcmd(const struct loadcmd* c, elf_addr_t base_diff,
 
         if ((ret = file->fs->fs_ops->mmap(file, map_start, map_size, c->prot, map_flags,
                                           c->map_off)) < 0) {
-            log_debug("%s: failed to map segment: %d", __func__, ret);
+            log_debug("%s: failed to map segment: %s", __func__, unix_strerror(ret));
             return ret;
         }
     }
@@ -308,8 +308,7 @@ static int execute_loadcmd(const struct loadcmd* c, elf_addr_t base_diff,
             return ret;
         }
 
-        if ((ret = PalVirtualMemoryAlloc(&zero_page_start, zero_page_size, /*alloc_type=*/0,
-                                         zero_pal_prot)) < 0) {
+        if ((ret = PalVirtualMemoryAlloc(zero_page_start, zero_page_size, zero_pal_prot)) < 0) {
             log_debug("%s: cannot map zero-fill pages", __func__);
             return pal_to_unix_errno(ret);
         }
@@ -985,8 +984,7 @@ static int vdso_map_init(void) {
         return ret;
     }
 
-    ret = PalVirtualMemoryAlloc(&addr, ALLOC_ALIGN_UP(vdso_so_size), /*alloc_type=*/0,
-                                PAL_PROT_READ | PAL_PROT_WRITE);
+    ret = PalVirtualMemoryAlloc(addr, ALLOC_ALIGN_UP(vdso_so_size), PAL_PROT_READ | PAL_PROT_WRITE);
     if (ret < 0) {
         return pal_to_unix_errno(ret);
     }
@@ -1093,7 +1091,7 @@ noreturn void execute_elf_object(struct link_map* exec_map, void* argp, elf_auxv
 
     int ret = vdso_map_init();
     if (ret < 0) {
-        log_error("Could not initialize vDSO (error code = %d)", ret);
+        log_error("Could not initialize vDSO: %s", unix_strerror(ret));
         process_exit(/*error_code=*/0, /*term_signal=*/SIGKILL);
     }
 
@@ -1143,7 +1141,7 @@ noreturn void execute_elf_object(struct link_map* exec_map, void* argp, elf_auxv
     elf_addr_t random = auxp_extra; /* random 16B for AT_RANDOM */
     ret = PalRandomBitsRead((void*)random, 16);
     if (ret < 0) {
-        log_error("execute_elf_object: PalRandomBitsRead failed: %d", ret);
+        log_error("execute_elf_object: PalRandomBitsRead failed: %s", pal_strerror(ret));
         PalProcessExit(1);
         /* UNREACHABLE */
     }

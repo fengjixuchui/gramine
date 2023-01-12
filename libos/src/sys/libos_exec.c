@@ -31,7 +31,7 @@ noreturn static void __libos_syscall_execve_rtld(void* new_argp, elf_auxv_t* new
 
     size_t count;
     struct libos_vma_info* vmas;
-    ret = dump_all_vmas(&vmas, &count, /*include_unmapped=*/true);
+    ret = dump_all_vmas(/*include_unmapped=*/true, &vmas, &count);
     if (ret < 0) {
         goto error;
     }
@@ -46,8 +46,10 @@ noreturn static void __libos_syscall_execve_rtld(void* new_argp, elf_auxv_t* new
         if (bkeep_munmap(vma->addr, vma->length, !!(vma->flags & VMA_INTERNAL), &tmp_vma) < 0) {
             BUG();
         }
-        if (PalVirtualMemoryFree(vma->addr, vma->length) < 0) {
-            BUG();
+        if (!(vma->flags & VMA_UNMAPPED)) {
+            if (PalVirtualMemoryFree(vma->addr, vma->length) < 0) {
+                BUG();
+            }
         }
         bkeep_remove_tmp_vma(tmp_vma);
     }
@@ -79,7 +81,7 @@ noreturn static void __libos_syscall_execve_rtld(void* new_argp, elf_auxv_t* new
     /* NOTREACHED */
 
 error:
-    log_error("execve failed with errno=%d", ret);
+    log_error("execve failed with: %s", unix_strerror(ret));
     process_exit(/*error_code=*/0, /*term_signal=*/SIGKILL);
 }
 
@@ -134,17 +136,22 @@ static int libos_syscall_execve_rtld(struct libos_handle* hdl, char** argv,
 
 long libos_syscall_execve(const char* file, const char* const* argv, const char* const* envp) {
     int ret = 0, argc = 0;
+    const char* const empty_argv[1] = {NULL};
 
     if (!is_user_string_readable(file))
         return -EFAULT;
 
-    for (const char* const* a = argv; /* no condition*/; a++, argc++) {
-        if (!is_user_memory_readable(a, sizeof(*a)))
-            return -EFAULT;
-        if (*a == NULL)
-            break;
-        if (!is_user_string_readable(*a))
-            return -EFAULT;
+    if (!argv) {
+        argv = empty_argv;
+    } else {
+        for (const char* const* a = argv; /* no condition */; a++, argc++) {
+            if (!is_user_memory_readable(a, sizeof(*a)))
+                return -EFAULT;
+            if (*a == NULL)
+                break;
+            if (!is_user_string_readable(*a))
+                return -EFAULT;
+        }
     }
 
     /* TODO: This should be removed, but: https://github.com/gramineproject/graphene/issues/2081 */

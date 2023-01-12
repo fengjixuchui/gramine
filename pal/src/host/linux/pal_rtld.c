@@ -19,23 +19,16 @@
 #include "pal_linux.h"
 #include "pal_rtld.h"
 
-uintptr_t g_vdso_start = 0;
-uintptr_t g_vdso_end = 0;
-
-bool is_in_vdso(uintptr_t addr) {
-    return (g_vdso_start || g_vdso_end) && g_vdso_start <= addr && addr < g_vdso_end;
-}
-
 void _PalDebugMapAdd(const char* name, void* addr) {
     int ret = debug_map_add(name, addr);
     if (ret < 0)
-        log_error("debug_map_add(%s, %p) failed: %d", name, addr, ret);
+        log_error("debug_map_add(%s, %p) failed: %s", name, addr, unix_strerror(ret));
 }
 
 void _PalDebugMapRemove(void* addr) {
     int ret = debug_map_remove(addr);
     if (ret < 0)
-        log_error("debug_map_remove(%p) failed: %d", addr, ret);
+        log_error("debug_map_remove(%p) failed: %s", addr, unix_strerror(ret));
 }
 
 /* populate g_pal_linux_state.vdso_clock_gettime based on vDSO */

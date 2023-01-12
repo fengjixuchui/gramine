@@ -9,11 +9,13 @@ fs.mounts = [
 ]
 
 # app runs with 4 parallel threads + Gramine has couple internal threads
+# TODO: legacy `sgx.thread_num` name just for testing, deprecated in v1.4, remove in v1.5
 sgx.thread_num = 8
 sgx.insecure__rpc_thread_num = 8
 
 sgx.nonpie_binary = true
 sgx.debug = true
+sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
 sgx.enable_stats = true
 
 sgx.trusted_files = [

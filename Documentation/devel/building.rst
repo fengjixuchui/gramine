@@ -36,13 +36,13 @@ Common dependencies
 Run the following command on Ubuntu LTS to install dependencies::
 
     sudo apt-get install -y build-essential \
-        autoconf bison gawk nasm ninja-build python3 python3-click \
-        python3-jinja2 python3-pyelftools wget
-    sudo python3 -m pip install 'meson>=0.56' 'toml>=0.10'
+        autoconf bison gawk nasm ninja-build pkg-config python3 python3-click \
+        python3-jinja2 python3-pip python3-pyelftools wget
+    sudo python3 -m pip install 'meson>=0.56' 'tomli>=1.1.0' 'tomli-w>=0.4.0'
 
-You can also install Meson and python3-toml from apt instead of pip, but only if
-your distro is new enough to have Meson >= 0.56 and python3-toml >= 0.10 (Debian
-11, Ubuntu 20.10).
+You can also install Meson, python3-tomli and python3-tomli-w from apt instead
+of pip, but only if your distro is new enough to have Meson >= 0.56,
+python3-tomli >= 1.1.0 and python3-tomli-w >= 0.4.0 (e.g. Ubuntu 22.04).
 
 For GDB support and to run all tests locally you also need to install::
 
@@ -71,9 +71,8 @@ running, and Intel SGX SDK/PSW/DCAP must be installed.
 """"""""""""""""""""
 Run the following commands on Ubuntu to install SGX-related dependencies::
 
-    sudo apt-get install -y libcurl4-openssl-dev \
-        libprotobuf-c-dev protobuf-c-compiler protobuf-compiler \
-        python3-cryptography python3-pip python3-protobuf
+    sudo apt-get install -y libprotobuf-c-dev protobuf-c-compiler \
+        protobuf-compiler python3-cryptography python3-pip python3-protobuf
 
 2. Install Linux kernel with patched FSGSBASE
 """""""""""""""""""""""""""""""""""""""""""""
@@ -187,15 +186,21 @@ The ``-Dsgx_driver`` parameter controls which SGX driver to use:
 
 * ``upstream`` (default) for upstreamed in-kernel driver (mainline Linux kernel
   5.11+),
-* ``dcap1.6`` for Intel DCAP version 1.6 or higher,  but below 1.10,
-* ``dcap1.10`` for Intel DCAP version 1.10 or higher,
 * ``oot`` for non-DCAP, out-of-tree version of the driver.
 
 The ``-Dsgx_driver_include_path`` parameter must point to the absolute path
 where the SGX driver was downloaded or installed in the previous step. For
-example, for the DCAP version 1.41 of the SGX driver, you must specify
-``-Dsgx_driver_include_path="/usr/src/sgx-1.41/include/"``. If this parameter is
-omitted, Gramine's build system will try to determine the right path.
+example, for the OOT driver installed at the default path, you can specify
+``-Dsgx_driver_include_path="/opt/intel/linux-sgx-driver"``. If this parameter
+is omitted, Gramine's build system will try to determine the right path, so,
+it's usually not needed.
+
+.. note::
+
+   If you have a DCAP driver installed on the system (e.g. on 18.04 Azure),
+   then you can still use the upstream driver and specify the `upstream header
+   file <https://git.kernel.org/pub/scm/linux/kernel/git/stable/linux.git/plain/arch/x86/include/uapi/asm/sgx.h?h=v5.11>`__.
+   This is because the DCAP and the upstream drivers have compatible APIs.
 
 .. note::
 
@@ -313,6 +318,55 @@ Gramine binaries, along with an SGX-specific manifest (``.manifest.sgx``
 extension), the SIGSTRUCT signature file (``.sig`` extension), and the
 EINITTOKEN file (``.token`` extension) to execute on another SGX-enabled host.
 
+Advanced: building without network access
+-----------------------------------------
+
+First, before you cut your network access, you need to download (or otherwise
+obtain) a |~| checkout of Gramine repository and all wrapped subprojects'
+distfiles. The files :file:`subprojects/{*}.wrap` describe those downloads and
+their respective SHA-256 checksums. You can use :command:`meson subprojects
+download` to download and check them automatically. Otherwise, you should put
+all those distfiles into :file:`subprojects/packagecache` directory. Pay
+attention to expected filenames as specified in wrap files. (You don't need to
+checksum them separately, Meson will do that for you later if they're mismatched
+or corrupted).
+
+Alternatively, you can prepare a |~| "dist" tarball using :command:`meson dist`
+command, which apart from Gramine code will contain all wrapped subprojects and
+also git submodules. For this you need to create a |~| dummy builddir using
+:command:`meson setup` command::
+
+    meson setup build-dist/ \
+        -Ddirect=disabled -Dsgx=disabled -Dskeleton=enabled \
+        -Dglibc=enabled -Dmusl=enabled -Dlibgomp-enabled
+    meson dist -C build-dist/ --no-tests --include-subprojects --formats=gztar
+
+The options specified with ``-D`` (especially ``-Dglibc``, ``-Dmusl`` and
+``-Dlibgomp``) are important, because without them some subprojects will not be
+included in the tarball (if in doubt, you can consult
+:file:`scripts/makedist.sh` script). The command :command:`meson dist` still
+needs network access, because it downloads subprojects and checks out git
+submodules. The tarballs are located in :file:`build-dist/meson-dist`. You can
+adjust ``--formats`` option to your needs.
+
+You can now sever your network connection::
+
+    sudo unshare -n su "$USER"
+
+If you build from dist tarball, unpack it and :command:`cd` to the main
+directory. If not, go to the repository checkout where you've downloaded
+:file:`subproject/packagecache`. In either case, you can now :command:`meson
+setup` your build directory with the switch ``--wrap-mode=nodownload``, which
+prevents Meson from downloading subprojects. Those subprojects should already be
+downloaded and if you didn't :command:`unshare -n`, it prevents a |~| mistake.
+Proceed with compiling and installing as usual.
+
+::
+
+    meson setup build/ --prefix=/usr --wrap-mode=nodownload \
+        -Ddirect=enabled -Dsgx=enabled -Dsgx_driver=upstream
+    meson compile -C build/
+    meson install -C build/
 
 Advanced: installing Linux kernel with FSGSBASE patches
 -------------------------------------------------------

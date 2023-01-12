@@ -60,8 +60,10 @@ int init_ipc_ids(void) {
  * returns `false`. If a range was returned, it is not larger than `MAX_RANGE_SIZE`. */
 static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
     assert(locked(&g_id_owners_tree_lock));
+
     static_assert(!IS_SIGNED(IDTYPE), "IDTYPE must be unsigned");
-    IDTYPE next_id = g_last_id + 1 ?: 1;
+    static_assert(PID_MAX <= IDTYPE_MAX - (MAX_RANGE_SIZE - 1), "int overflow may happen");
+    IDTYPE next_id = (g_last_id + 1 > PID_MAX) ? 1 : g_last_id + 1;
 
     struct id_range dummy = {
         .start = next_id,
@@ -73,16 +75,17 @@ static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
         if (next_id < range->start) {
             /* `next_id` does not overlap any existing range. */
             *start = next_id;
-            if (__builtin_add_overflow(next_id, MAX_RANGE_SIZE - 1, end)) {
-                *end = IDTYPE_MAX;
+            *end   = next_id + MAX_RANGE_SIZE - 1;
+            if (*end > PID_MAX) {
+                *end = PID_MAX;
             }
             *end = MIN(*end, range->start - 1);
             return true;
         }
         /* `next_id` overlaps `range`. */
         assert(next_id <= range->end);
-        if (range->end == IDTYPE_MAX) {
-            /* No ids available in range `[g_last_id + 1, IDTYPE_MAX]`. If wrapping is needed, set
+        if (range->end == PID_MAX) {
+            /* No ids available in range `[g_last_id + 1, PID_MAX]`. If wrapping is needed, set
              * `g_last_id` and call this function again. */
             return false;
         }
@@ -91,8 +94,9 @@ static bool _find_free_id_range(IDTYPE* start, IDTYPE* end) {
     }
     /* There are no ids greater or equal to `next_id`. */
     *start = next_id;
-    if (__builtin_add_overflow(next_id, MAX_RANGE_SIZE - 1, end)) {
-        *end = IDTYPE_MAX;
+    *end   = next_id + MAX_RANGE_SIZE - 1;
+    if (*end > PID_MAX) {
+        *end = PID_MAX;
     }
     return true;
 }
@@ -281,7 +285,7 @@ int ipc_alloc_id_range_callback(IDTYPE src, void* data, uint64_t seq) {
         end = 0;
     }
 
-    log_debug("%s: %d", __func__, ret);
+    log_debug("%s: %d (%s)", __func__, ret, unix_strerror(ret));
 
     struct ipc_id_range_msg range = {
         .start = start,
@@ -316,7 +320,7 @@ int ipc_release_id_range(IDTYPE start, IDTYPE end) {
     log_debug("%s: sending a request: [%u..%u]", __func__, start, end);
 
     int ret = ipc_send_message(g_process_ipc_ids.leader_vmid, msg);
-    log_debug("%s: ipc_send_message: %d", __func__, ret);
+    log_debug("%s: ipc_send_message: %s", __func__, unix_strerror(ret));
     free(msg);
     return ret;
 }
@@ -350,7 +354,7 @@ int ipc_change_id_owner(IDTYPE id, IDTYPE new_owner) {
     log_debug("%s: sending a request (%u, %u)", __func__, id, new_owner);
 
     int ret = ipc_send_msg_and_get_response(g_process_ipc_ids.leader_vmid, msg, /*resp=*/NULL);
-    log_debug("%s: ipc_send_msg_and_get_response: %d", __func__, ret);
+    log_debug("%s: ipc_send_msg_and_get_response: %s", __func__, unix_strerror(ret));
     free(msg);
     return ret;
 }
@@ -358,7 +362,8 @@ int ipc_change_id_owner(IDTYPE id, IDTYPE new_owner) {
 int ipc_change_id_owner_callback(IDTYPE src, void* data, uint64_t seq) {
     struct ipc_id_owner_msg* owner_msg = data;
     int ret = change_id_owner(owner_msg->id, owner_msg->owner);
-    log_debug("%s: change_id_owner(%u, %u): %d", __func__, owner_msg->id, owner_msg->owner, ret);
+    log_debug("%s: change_id_owner(%u, %u): %s", __func__, owner_msg->id, owner_msg->owner,
+              unix_strerror(ret));
     if (ret < 0) {
         return ret;
     }

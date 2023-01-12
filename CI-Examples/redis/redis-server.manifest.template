@@ -70,6 +70,13 @@ sgx.debug = true
 # typical Redis workloads.
 sgx.enclave_size = "1024M"
 
+# Enable Enclave Dynamic Memory Management (EDMM) feature based on EDMM
+# environment variable. This allows for addition of pages to enclave in runtime,
+# instead of allocating them upfront at startup. If this feature is enabled,
+# `sgx.enclave_size` above describes a maximal enclave size and can usually be
+# increased without negative consequences (it does not impact startup time).
+sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
+
 # Set maximum number of in-enclave threads (somewhat arbitrarily) to 8. Recall
 # that SGX v1 requires to specify the maximum number of simultaneous threads at
 # enclave creation time.
@@ -78,7 +85,7 @@ sgx.enclave_size = "1024M"
 # and one for asynchronous events/alarms. Redis is technically single-threaded
 # but spawns couple additional threads to do background bookkeeping. Therefore,
 # specifying '8' allows to run a maximum of 6 Redis threads which is enough.
-sgx.thread_num = 8
+sgx.max_threads = 8
 
 # Redis executable is typically a PIE (Position Independent Executable) on most
 # modern OS distros (e.g., Ubuntu 18.04). However, on some OS distros (notably,

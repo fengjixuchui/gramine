@@ -14,6 +14,7 @@ int main(int argc, char** argv, char** envp) {
     PRINT_SYMBOL(PalVirtualMemoryAlloc);
     PRINT_SYMBOL(PalVirtualMemoryFree);
     PRINT_SYMBOL(PalVirtualMemoryProtect);
+    PRINT_SYMBOL(PalSetMemoryBookkeepingUpcalls);
 
     PRINT_SYMBOL(PalProcessCreate);
     PRINT_SYMBOL(PalProcessExit);
@@ -55,7 +56,6 @@ int main(int argc, char** argv, char** envp) {
     PRINT_SYMBOL(PalSegmentBaseGet);
     PRINT_SYMBOL(PalSegmentBaseSet);
 #endif
-    PRINT_SYMBOL(PalMemoryAvailableQuota);
 
     return 0;
 }

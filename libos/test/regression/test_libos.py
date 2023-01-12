@@ -7,6 +7,7 @@ import subprocess
 import unittest
 
 from graminelibos.regression import (
+    HAS_EDMM,
     HAS_SGX,
     ON_X86,
     USES_MUSL,
@@ -66,6 +67,10 @@ class TC_00_Unittests(RegressionTestCase):
 class TC_01_Bootstrap(RegressionTestCase):
     def test_001_helloworld(self):
         stdout, _ = self.run_binary(['helloworld'])
+        self.assertIn('Hello world!', stdout)
+
+    def test_002_toml_parsing(self):
+        stdout, _ = self.run_binary(['toml_parsing'])
         self.assertIn('Hello world!', stdout)
 
     def test_100_basic_bootstrapping(self):
@@ -238,9 +243,14 @@ class TC_01_Bootstrap(RegressionTestCase):
             'ALPHA BRAVO CHARLIE DELTA '
             'scripts/foo.sh STRING FROM EXECVE', stdout)
 
+    def test_212_exec_null(self):
+        stdout, _ = self.run_binary(['exec_null'])
+        self.assertIn('Hello World ((null))!', stdout)
+        self.assertIn('envp[\'IN_EXECVE\'] = (null)', stdout)
+
     @unittest.skipIf(USES_MUSL,
         'Test uses /bin/sh from the host which is usually built against glibc')
-    def test_212_shebang_test_script(self):
+    def test_213_shebang_test_script(self):
         stdout, _ = self.run_binary(['shebang_test_script'])
         self.assertRegex(stdout, r'Printing Args: '
             r'scripts/baz\.sh ECHO FOXTROT GOLF scripts/bar\.sh '
@@ -526,12 +536,14 @@ class TC_04_Attestation(RegressionTestCase):
         self.assertIn("Test local attestation... SUCCESS", stdout)
         self.assertIn("Test quote interface... SUCCESS", stdout)
 
+    @unittest.skipIf(HAS_EDMM, 'EDMM machines use DCAP attestation')
     def test_002_attestation_deprecated(self):
         stdout, _ = self.run_binary(['attestation_deprecated_syntax'], timeout=60)
         self.assertIn("Test resource leaks in attestation filesystem... SUCCESS", stdout)
         self.assertIn("Test local attestation... SUCCESS", stdout)
         self.assertIn("Test quote interface... SUCCESS", stdout)
 
+    @unittest.skipIf(HAS_EDMM, 'EDMM machines use DCAP attestation')
     def test_003_attestation_deprecated_stdio(self):
         stdout, _ = self.run_binary(['attestation_deprecated_syntax', 'test_stdio'], timeout=60)
         self.assertIn("Test resource leaks in attestation filesystem... SUCCESS", stdout)
@@ -815,6 +827,10 @@ class TC_30_Syscall(RegressionTestCase):
 
     def test_059_madvise(self):
         stdout, _ = self.run_binary(['madvise'])
+        self.assertIn('TEST OK', stdout)
+
+    def test_05A_munmap(self):
+        stdout, _ = self.run_binary(['munmap'])
         self.assertIn('TEST OK', stdout)
 
     @unittest.skip('sigaltstack isn\'t correctly implemented')
@@ -1213,8 +1229,7 @@ class TC_50_GDB(RegressionTestCase):
 class TC_80_Socket(RegressionTestCase):
     def test_000_getsockopt(self):
         stdout, _ = self.run_binary(['getsockopt'])
-        self.assertIn('getsockopt: Got socket type OK', stdout)
-        self.assertIn('getsockopt: Got TCP_NODELAY flag OK', stdout)
+        self.assertIn('TEST OK', stdout)
 
     def test_010_epoll(self):
         stdout, _ = self.run_binary(['epoll_test'])
@@ -1284,22 +1299,8 @@ class TC_80_Socket(RegressionTestCase):
         self.assertIn('[parent] TEST OK', stdout)
 
     def test_100_socket_unix(self):
-        if os.path.exists("dummy"):
-            os.remove("dummy")
-        if os.path.exists("u"):
-            os.remove("u")
-
         stdout, _ = self.run_binary(['unix'])
-        self.assertIn('Data: This is packet 0', stdout)
-        self.assertIn('Data: This is packet 1', stdout)
-        self.assertIn('Data: This is packet 2', stdout)
-        self.assertIn('Data: This is packet 3', stdout)
-        self.assertIn('Data: This is packet 4', stdout)
-        self.assertIn('Data: This is packet 5', stdout)
-        self.assertIn('Data: This is packet 6', stdout)
-        self.assertIn('Data: This is packet 7', stdout)
-        self.assertIn('Data: This is packet 8', stdout)
-        self.assertIn('Data: This is packet 9', stdout)
+        self.assertIn('TEST OK', stdout)
 
     def test_200_socket_udp(self):
         stdout, _ = self.run_binary(['udp'])

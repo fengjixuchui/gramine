@@ -83,7 +83,8 @@ int ocall_sched_getaffinity(void* tcs, unsigned long* cpu_mask, size_t cpu_mask_
 
 int ocall_clone_thread(void);
 
-int ocall_create_process(size_t nargs, const char** args, int* stream_fd);
+int ocall_create_process(size_t nargs, const char** args, uintptr_t (*reserved_mem_ranges)[2],
+                         size_t reserved_mem_ranges_len, int* out_stream_fd);
 
 int ocall_futex(uint32_t* uaddr, int op, int val, uint64_t* timeout_us);
 
@@ -124,3 +125,7 @@ int ocall_eventfd(int flags);
  */
 int ocall_get_quote(const sgx_spid_t* spid, bool linkable, const sgx_report_t* report,
                     const sgx_quote_nonce_t* nonce, char** quote, size_t* quote_len);
+
+int ocall_edmm_restrict_pages_perm(uint64_t addr, size_t count, uint64_t prot);
+int ocall_edmm_modify_pages_type(uint64_t addr, size_t count, uint64_t type);
+int ocall_edmm_remove_pages(uint64_t addr, size_t count);

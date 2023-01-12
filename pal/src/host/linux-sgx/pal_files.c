@@ -8,7 +8,6 @@
 #include <asm/fcntl.h>
 #include <asm/stat.h>
 #include <linux/types.h>
-#include <sys/types.h>
 
 #include "api.h"
 #include "asan.h"
@@ -21,9 +20,9 @@
 #include "pal_linux.h"
 #include "pal_linux_defs.h"
 #include "pal_linux_error.h"
+#include "pal_sgx.h"
+#include "path_utils.h"
 #include "stat.h"
-
-#include "enclave_pages.h"
 
 /* this macro is used to emulate mmap() via pread() in chunks of 128MB (mmapped files may be many
  * GBs in size, and a pread OCALL could fail with -ENOMEM, so we cap to reasonably small size) */
@@ -51,9 +50,8 @@ static int file_open(PAL_HANDLE* handle, const char* type, const char* uri,
     if (!normpath)
         return -PAL_ERROR_NOMEM;
 
-    ret = get_norm_path(uri, normpath, &normpath_size);
-    if (ret < 0) {
-        log_warning("Could not normalize path (%s): %s", uri, pal_strerror(ret));
+    if (!get_norm_path(uri, normpath, &normpath_size)) {
+        log_warning("Could not normalize path (%s)", uri);
         free(normpath);
         return -PAL_ERROR_DENIED;
     }
@@ -245,7 +243,7 @@ static int file_delete(PAL_HANDLE handle, enum pal_delete_mode delete_mode) {
 }
 
 /* 'map' operation for file stream. */
-static int file_map(PAL_HANDLE handle, void** addr, pal_prot_flags_t prot, uint64_t offset,
+static int file_map(PAL_HANDLE handle, void* addr, pal_prot_flags_t prot, uint64_t offset,
                     uint64_t size) {
     assert(IS_ALLOC_ALIGNED(offset) && IS_ALLOC_ALIGNED(size));
     int ret;
@@ -260,19 +258,6 @@ static int file_map(PAL_HANDLE handle, void** addr, pal_prot_flags_t prot, uint6
         return -PAL_ERROR_INVAL;
     }
 
-    sgx_chunk_hash_t* chunk_hashes = handle->file.chunk_hashes;
-    void* mem = *addr;
-
-    /* If the file is listed in the manifest as an "allowed" file, we allow mapping the file outside
-     * the enclave, if the library OS does not request a specific address. */
-    if (!mem && !chunk_hashes && !(prot & PAL_PROT_WRITECOPY)) {
-        ret = ocall_mmap_untrusted(&mem, size, PAL_PROT_TO_LINUX(prot), MAP_SHARED, handle->file.fd,
-                                   offset);
-        if (ret >= 0)
-            *addr = mem;
-        return ret < 0 ? unix_to_pal_error(ret) : ret;
-    }
-
     if (!(prot & PAL_PROT_WRITECOPY) && (prot & PAL_PROT_WRITE)) {
         log_warning(
             "file_map does not currently support writable pass-through mappings on SGX. You "
@@ -282,52 +267,67 @@ static int file_map(PAL_HANDLE handle, void** addr, pal_prot_flags_t prot, uint6
         return -PAL_ERROR_DENIED;
     }
 
-    mem = get_enclave_pages(mem, size, /*is_pal_internal=*/false);
-    if (!mem)
-        return -PAL_ERROR_NOMEM;
+    /* Sanity checks. */
+    if (!addr || !sgx_is_completely_within_enclave(addr, size)) {
+        return -PAL_ERROR_INVAL;
+    }
 
+    if (g_pal_linuxsgx_state.edmm_enabled) {
+        /* Enclave pages will be written to below, so we must add W permission. */
+        ret = sgx_edmm_add_pages((uint64_t)addr, size / PAGE_SIZE,
+                                 PAL_TO_SGX_PROT(prot | PAL_PROT_WRITE));
+        if (ret < 0) {
+            return ret;
+        }
+    } else {
+#ifdef ASAN
+        asan_unpoison_region((uintptr_t)addr, size);
+#endif
+    }
+
+    sgx_chunk_hash_t* chunk_hashes = handle->file.chunk_hashes;
     if (chunk_hashes) {
         /* case of trusted file: already mmaped in umem, copy from there into enclave memory and
          * verify hashes along the way */
         off_t end = MIN(offset + size, handle->file.total);
+        size_t bytes_filled;
         if ((off_t)offset >= end) {
             /* file is mmapped at offset beyond file size, there are no trusted-file contents to
              * back mmapped enclave pages; this is a legit case, so simply zero out these enclave
-             * pages (for sanity) and return success */
-            memset(mem, 0, size);
-            *addr = mem;
-            return 0;
+             * pages and return success */
+            bytes_filled = 0;
+        } else {
+            off_t aligned_offset = ALIGN_DOWN(offset, TRUSTED_CHUNK_SIZE);
+            off_t aligned_end    = ALIGN_UP(end, TRUSTED_CHUNK_SIZE);
+            off_t total_size     = aligned_end - aligned_offset;
+
+            if ((uint64_t)total_size > SIZE_MAX) {
+                /* for compatibility with 32-bit systems */
+                ret = -PAL_ERROR_INVAL;
+                goto out;
+            }
+
+            ret = copy_and_verify_trusted_file(handle->file.realpath, addr, handle->file.umem,
+                                               aligned_offset, aligned_end, offset, end, chunk_hashes,
+                                               handle->file.total);
+            if (ret < 0) {
+                log_error("file_map - copy & verify on trusted file: %s", pal_strerror(ret));
+                goto out;
+            }
+
+            bytes_filled = end - offset;
         }
 
-        off_t aligned_offset = ALIGN_DOWN(offset, TRUSTED_CHUNK_SIZE);
-        off_t aligned_end    = ALIGN_UP(end, TRUSTED_CHUNK_SIZE);
-        off_t total_size     = aligned_end - aligned_offset;
-
-        if ((uint64_t)total_size > SIZE_MAX) {
-            /* for compatibility with 32-bit systems */
-            ret = -PAL_ERROR_INVAL;
-            goto out;
-        }
-
-        ret = copy_and_verify_trusted_file(handle->file.realpath, mem, handle->file.umem,
-                                           aligned_offset, aligned_end, offset, end, chunk_hashes,
-                                           handle->file.total);
-        if (ret < 0) {
-            log_error("file_map - copy & verify on trusted file returned %d", ret);
-            goto out;
-        }
-
-        size_t bytes_filled = end - offset;
         if (size > bytes_filled) {
             /* file ended before all mmapped memory was filled -- remaining memory must be zeroed */
-            memset(mem + bytes_filled, 0, size - bytes_filled);
+            memset((char*)addr + bytes_filled, 0, size - bytes_filled);
         }
     } else {
         /* case of allowed file: simply read from underlying file descriptor into enclave memory */
         size_t bytes_read = 0;
         while (bytes_read < size) {
             size_t read_size = MIN(size - bytes_read, MAX_READ_SIZE);
-            ssize_t bytes = ocall_pread(handle->file.fd, mem + bytes_read, read_size,
+            ssize_t bytes = ocall_pread(handle->file.fd, (char*)addr + bytes_read, read_size,
                                         offset + bytes_read);
             if (bytes > 0) {
                 bytes_read += bytes;
@@ -344,16 +344,37 @@ static int file_map(PAL_HANDLE handle, void** addr, pal_prot_flags_t prot, uint6
 
         if (size > bytes_read) {
             /* file ended before all mmapped memory was filled -- remaining memory must be zeroed */
-            memset(mem + bytes_read, 0, size - bytes_read);
+            memset((char*)addr + bytes_read, 0, size - bytes_read);
         }
     }
 
-    *addr = mem;
+    if (g_pal_linuxsgx_state.edmm_enabled && !(prot & PAL_PROT_WRITE)) {
+        /* Clear W permission, in case we added it artificially. */
+        ret = sgx_edmm_set_page_permissions((uint64_t)addr, size / PAGE_SIZE,
+                                            PAL_TO_SGX_PROT(prot));
+        if (ret < 0) {
+            log_error("%s: failed to remove W bit from pages permissions at %p-%p", __func__,
+                      (char*)addr, (char*)addr + size);
+            goto out;
+        }
+    }
+
     ret = 0;
 
 out:
     if (ret < 0) {
-        free_enclave_pages(mem, size);
+        if (g_pal_linuxsgx_state.edmm_enabled) {
+            int tmp_ret = sgx_edmm_remove_pages((uint64_t)addr, size / PAGE_SIZE);
+            if (tmp_ret < 0) {
+                log_error("%s (ret: %d): removing previously allocated pages failed: %s",
+                          __func__, ret, unix_strerror(tmp_ret));
+                die_or_inf_loop();
+            }
+        } else {
+#ifdef ASAN
+            asan_poison_region((uintptr_t)addr, size, ASAN_POISON_USER);
+#endif
+        }
     }
     return ret;
 }
@@ -404,9 +425,9 @@ static int file_attrquery(const char* type, const char* uri, PAL_STREAM_ATTR* at
         ret = -PAL_ERROR_NOMEM;
         goto out;
     }
-    ret = get_norm_path(uri, path, &path_size);
-    if (ret < 0) {
-        log_warning("Could not normalize path (%s): %s", uri, pal_strerror(ret));
+    if (!get_norm_path(uri, path, &path_size)) {
+        log_warning("Could not normalize path (%s)", uri);
+        ret = -PAL_ERROR_INVAL;
         goto out;
     }
 

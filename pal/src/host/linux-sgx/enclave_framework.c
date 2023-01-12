@@ -9,6 +9,7 @@
 #include "pal_internal.h"
 #include "pal_linux.h"
 #include "pal_linux_error.h"
+#include "path_utils.h"
 #include "sgx_arch.h"
 #include "spinlock.h"
 #include "toml.h"
@@ -200,6 +201,15 @@ bool sgx_copy_to_enclave(void* ptr, size_t maxsize, const void* uptr, size_t usi
     return true;
 }
 
+bool sgx_copy_from_enclave(void* urts_ptr, const void* enclave_ptr, size_t size) {
+    if (!sgx_is_valid_untrusted_ptr(urts_ptr, size, /*alignment=*/1)
+            || !sgx_is_completely_within_enclave(enclave_ptr, size)) {
+        return false;
+    }
+    memcpy(urts_ptr, enclave_ptr, size);
+    return true;
+}
+
 void* sgx_import_array_to_enclave(const void* uptr, size_t elem_size, size_t elem_cnt) {
     size_t size;
     if (__builtin_mul_overflow(elem_size, elem_cnt, &size))
@@ -232,6 +242,7 @@ static void print_report(sgx_report_t* r) {
 
 #define BYTES2HEX(bytes) (bytes2hex(bytes, sizeof(bytes), hex, sizeof(hex)))
     log_debug("  cpu_svn:     %s",     BYTES2HEX(r->body.cpu_svn.svn));
+    log_debug("  misc_select: %08x",   r->body.misc_select);
     log_debug("  mr_enclave:  %s",     BYTES2HEX(r->body.mr_enclave.m));
     log_debug("  mr_signer:   %s",     BYTES2HEX(r->body.mr_signer.m));
     log_debug("  attr.flags:  %016lx", r->body.attributes.flags);
@@ -248,7 +259,7 @@ int sgx_get_report(const sgx_target_info_t* target_info, const sgx_report_data_t
                    sgx_report_t* report) {
     int ret = sgx_report(target_info, data, report);
     if (ret) {
-        log_error("sgx_report failed: ret = %d", ret);
+        log_error("sgx_report failed: %s", unix_strerror(ret));
         return -PAL_ERROR_DENIED;
     }
     return 0;
@@ -318,7 +329,7 @@ int sgx_get_seal_key(uint16_t key_policy, sgx_key_128bit_t* out_seal_key) {
 
     int ret = sgx_getkey(&key_request, out_seal_key);
     if (ret) {
-        log_error("Failed to generate sealing key using SGX EGETKEY\n");
+        log_error("Failed to generate sealing key using SGX EGETKEY");
         return -PAL_ERROR_DENIED;
     }
     return 0;
@@ -706,9 +717,10 @@ static int normalize_and_register_file(const char* uri, const char* hash_str) {
 
     memcpy(norm_uri, URI_PREFIX_FILE, URI_PREFIX_FILE_LEN);
     size_t norm_path_size = norm_uri_size - URI_PREFIX_FILE_LEN;
-    ret = get_norm_path(uri + URI_PREFIX_FILE_LEN, norm_uri + URI_PREFIX_FILE_LEN, &norm_path_size);
-    if (ret < 0) {
-        log_error("Path (%s) normalization failed: %s", uri, pal_strerror(ret));
+    if (!get_norm_path(uri + URI_PREFIX_FILE_LEN, norm_uri + URI_PREFIX_FILE_LEN,
+                       &norm_path_size)) {
+        log_error("Path (%s) normalization failed", uri);
+        ret = -PAL_ERROR_INVAL;
         goto out;
     }
 
@@ -778,8 +790,8 @@ int init_trusted_files(void) {
 
         ret = normalize_and_register_file(toml_trusted_uri_str, toml_trusted_sha256_str);
         if (ret < 0) {
-            log_error("normalize_and_register_file(\"%s\", \"%s\") failed with error code %d",
-                      toml_trusted_uri_str, toml_trusted_sha256_str, ret);
+            log_error("normalize_and_register_file(\"%s\", \"%s\") failed with error code: %s",
+                      toml_trusted_uri_str, toml_trusted_sha256_str, pal_strerror(ret));
             goto out;
         }
 
@@ -839,8 +851,8 @@ int init_allowed_files(void) {
 
         ret = normalize_and_register_file(toml_allowed_file_str, /*hash_str=*/NULL);
         if (ret < 0) {
-            log_error("normalize_and_register_file(\"%s\", NULL) failed with error code %d",
-                      toml_allowed_file_str, ret);
+            log_error("normalize_and_register_file(\"%s\", NULL) failed with error: %s",
+                      toml_allowed_file_str, pal_strerror(ret));
             goto out;
         }
 
@@ -1080,6 +1092,60 @@ out:
     return ret;
 }
 
+void sgx_report_body_to_target_info(const sgx_report_body_t* report_body,
+                                    sgx_target_info_t* out_target_info) {
+    *out_target_info = (sgx_target_info_t){
+        .mr_enclave = report_body->mr_enclave,
+        .attributes = report_body->attributes,
+        .cet_attributes = report_body->cet_attributes,
+        .config_svn = report_body->config_svn,
+        .misc_select = report_body->misc_select,
+        .config_id = report_body->config_id,
+    };
+}
+
+static void get_current_enclave_target_info(sgx_target_info_t* target_info) {
+    sgx_report_body_to_target_info(&g_pal_linuxsgx_state.enclave_info, target_info);
+}
+
+static int send_report(PAL_HANDLE stream, sgx_report_t* report) {
+    size_t sent = 0;
+    while (sent < sizeof(*report)) {
+        int64_t ret = _PalStreamWrite(stream, 0, sizeof(*report) - sent, (char*)report + sent);
+        if (ret < 0) {
+            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
+                continue;
+            }
+            log_error("Failed to send a report: %s", pal_strerror(ret));
+            return ret;
+        } else if (ret == 0) {
+            log_error("Failed to send a report: unexpected EOF");
+            return -PAL_ERROR_INVAL;
+        }
+        sent += ret;
+    }
+    return 0;
+}
+
+static int recv_report(PAL_HANDLE stream, sgx_report_t* report) {
+    size_t got = 0;
+    while (got < sizeof(*report)) {
+        int64_t ret = _PalStreamRead(stream, 0, sizeof(*report) - got, (char*)report + got);
+        if (ret < 0) {
+            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
+                continue;
+            }
+            log_error("Failed to send a report: %s", pal_strerror(ret));
+            return ret;
+        } else if (ret == 0) {
+            log_error("Failed to receive a report: unexpected EOF");
+            return -PAL_ERROR_INVAL;
+        }
+        got += ret;
+    }
+    return 0;
+}
+
 /*
  * Initalize the request of local report exchange.
  *
@@ -1088,44 +1154,14 @@ out:
  */
 int _PalStreamReportRequest(PAL_HANDLE stream, sgx_report_data_t* my_report_data,
                             sgx_report_data_t* peer_report_data) {
-    __sgx_mem_aligned sgx_target_info_t target_info;
-    __sgx_mem_aligned sgx_report_t report;
-    uint64_t bytes;
-    int64_t ret;
-
     assert(stream->hdr.type == PAL_TYPE_PROCESS);
-
-    /* A -> B: targetinfo[A] */
-    memset(&target_info, 0, sizeof(target_info));
-    memcpy(&target_info.mr_enclave, &g_pal_linuxsgx_state.enclave_info.mr_enclave,
-           sizeof(sgx_measurement_t));
-    memcpy(&target_info.attributes, &g_pal_linuxsgx_state.enclave_info.attributes,
-           sizeof(sgx_attributes_t));
-
-    for (bytes = 0, ret = 0; bytes < SGX_TARGETINFO_FILLED_SIZE; bytes += ret) {
-        ret = _PalStreamWrite(stream, 0, SGX_TARGETINFO_FILLED_SIZE - bytes,
-                              ((void*)&target_info) + bytes);
-        if (ret < 0) {
-            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
-                ret = 0;
-                continue;
-            }
-            log_error("Failed to send target info via RPC: %ld", ret);
-            goto out;
-        }
-    }
+    int ret;
+    __sgx_mem_aligned sgx_report_t report;
 
     /* B -> A: report[B -> A] */
-    for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamRead(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
-        if (ret < 0) {
-            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
-                ret = 0;
-                continue;
-            }
-            log_error("Failed to receive local report via RPC: %ld", ret);
-            goto out;
-        }
+    ret = recv_report(stream, &report);
+    if (ret < 0) {
+        return ret;
     }
 
     log_debug("Received local report");
@@ -1133,45 +1169,29 @@ int _PalStreamReportRequest(PAL_HANDLE stream, sgx_report_data_t* my_report_data
     /* Verify report[B -> A] */
     ret = sgx_verify_report(&report);
     if (ret < 0) {
-        log_error("Failed to verify local report: %ld", ret);
-        goto out;
+        log_error("Failed to verify local report: %s", pal_strerror(ret));
+        return ret;
     }
 
     if (!is_peer_enclave_ok(&report.body, peer_report_data)) {
         log_error("Not an allowed enclave");
-        ret = -PAL_ERROR_DENIED;
-        goto out;
+        return -PAL_ERROR_DENIED;
     }
 
     log_debug("Local attestation succeeded!");
 
-    /* A -> B: report[A -> B] */
-    memcpy(&target_info.mr_enclave, &report.body.mr_enclave, sizeof(sgx_measurement_t));
-    memcpy(&target_info.attributes, &report.body.attributes, sizeof(sgx_attributes_t));
+    /* Both A and B have the same target info. */
+    __sgx_mem_aligned sgx_target_info_t target_info;
+    get_current_enclave_target_info(&target_info);
 
+    /* A -> B: report[A -> B] */
     ret = sgx_get_report(&target_info, my_report_data, &report);
     if (ret < 0) {
-        log_error("Failed to get local report from CPU: %ld", ret);
-        goto out;
+        log_error("Failed to get local report from CPU: %s", pal_strerror(ret));
+        return ret;
     }
 
-    for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamWrite(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
-        if (ret < 0) {
-            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
-                ret = 0;
-                continue;
-            }
-            log_error("Failed to send local report via RPC: %ld", ret);
-            goto out;
-        }
-    }
-
-    return 0;
-
-out:
-    _PalStreamDelete(stream, PAL_DELETE_ALL);
-    return ret;
+    return send_report(stream, &report);
 }
 
 /*
@@ -1182,59 +1202,30 @@ out:
  */
 int _PalStreamReportRespond(PAL_HANDLE stream, sgx_report_data_t* my_report_data,
                             sgx_report_data_t* peer_report_data) {
-    __sgx_mem_aligned sgx_target_info_t target_info;
-    __sgx_mem_aligned sgx_report_t report;
-    uint64_t bytes;
-    int64_t ret;
-
     assert(stream->hdr.type == PAL_TYPE_PROCESS);
+    int ret;
+    __sgx_mem_aligned sgx_report_t report;
+    __sgx_mem_aligned sgx_target_info_t target_info;
 
-    memset(&target_info, 0, sizeof(target_info));
-
-    /* A -> B: targetinfo[A] */
-    for (bytes = 0, ret = 0; bytes < SGX_TARGETINFO_FILLED_SIZE; bytes += ret) {
-        ret = _PalStreamRead(stream, 0, SGX_TARGETINFO_FILLED_SIZE - bytes,
-                             ((void*)&target_info) + bytes);
-        if (ret < 0) {
-            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
-                ret = 0;
-                continue;
-            }
-            log_error("Failed to receive target info via RPC: %ld", ret);
-            goto out;
-        }
-    }
+    /* Both A and B have the same target info. */
+    get_current_enclave_target_info(&target_info);
 
     /* B -> A: report[B -> A] */
     ret = sgx_get_report(&target_info, my_report_data, &report);
     if (ret < 0) {
-        log_error("Failed to get local report from CPU: %ld", ret);
-        goto out;
+        log_error("Failed to get local report from CPU: %s", pal_strerror(ret));
+        return ret;
     }
 
-    for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamWrite(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
-        if (ret < 0) {
-            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
-                ret = 0;
-                continue;
-            }
-            log_error("Failed to send local report via PRC: %ld", ret);
-            goto out;
-        }
+    ret = send_report(stream, &report);
+    if (ret < 0) {
+        return ret;
     }
 
     /* A -> B: report[A -> B] */
-    for (bytes = 0, ret = 0; bytes < sizeof(report); bytes += ret) {
-        ret = _PalStreamRead(stream, 0, sizeof(report) - bytes, ((void*)&report) + bytes);
-        if (ret < 0) {
-            if (ret == -PAL_ERROR_INTERRUPTED || ret == -PAL_ERROR_TRYAGAIN) {
-                ret = 0;
-                continue;
-            }
-            log_error("Failed to receive local report via RPC: %ld", ret);
-            goto out;
-        }
+    ret = recv_report(stream, &report);
+    if (ret < 0) {
+        return ret;
     }
 
     log_debug("Received local report");
@@ -1242,22 +1233,17 @@ int _PalStreamReportRespond(PAL_HANDLE stream, sgx_report_data_t* my_report_data
     /* Verify report[A -> B] */
     ret = sgx_verify_report(&report);
     if (ret < 0) {
-        log_error("Failed to verify local report: %ld", ret);
-        goto out;
+        log_error("Failed to verify local report: %s", pal_strerror(ret));
+        return ret;
     }
 
     if (!is_peer_enclave_ok(&report.body, peer_report_data)) {
         log_error("Not an allowed enclave");
-        ret = -PAL_ERROR_DENIED;
-        goto out;
+        return -PAL_ERROR_DENIED;
     }
 
     log_debug("Local attestation succeeded!");
     return 0;
-
-out:
-    _PalStreamDelete(stream, PAL_DELETE_ALL);
-    return ret;
 }
 
 int _PalStreamSecureInit(PAL_HANDLE stream, bool is_server, PAL_SESSION_KEY* session_key,

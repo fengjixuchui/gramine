@@ -18,6 +18,7 @@ fs.mounts = [
 ]
 
 sgx.debug = true
+sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
 sgx.nonpie_binary = true
 
 sgx.trusted_files = [
@@ -40,4 +41,4 @@ sys.insecure__allow_eventfd = true
 # - any threads and threadpools you might be starting
 # - helper threads internal to Gramine — see:
 #   https://gramine.readthedocs.io/en/latest/manifest-syntax.html#number-of-threads
-sgx.thread_num = 8
+sgx.max_threads = 8

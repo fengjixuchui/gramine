@@ -18,12 +18,16 @@
 
 struct pal_common_state g_pal_common_state;
 
+extern struct pal_initial_mem_range g_initial_mem_ranges[];
+
 struct pal_public_state g_pal_public_state = {
     /* Enable log to catch early initialization errors; it will be overwritten in pal_main(). */
     .log_level = PAL_LOG_DEFAULT_LEVEL,
     .dns_host = {
         .hostname = "localhost",
     },
+    .initial_mem_ranges = g_initial_mem_ranges,
+    .initial_mem_ranges_len = 0,
 };
 
 struct pal_public_state* PalGetPalPublicState(void) {
@@ -301,7 +305,7 @@ static void configure_logging(void) {
         ret = _PalInitDebugStream(log_file);
 
         if (ret < 0)
-            INIT_FAIL("Cannot open log file: %d", ret);
+            INIT_FAIL("Cannot open log file: %s", pal_strerror(ret));
     }
     free(log_file);
 
@@ -497,7 +501,7 @@ noreturn void pal_main(uint64_t instance_id,       /* current instance id */
 
         ret = load_cstring_array(argv_src_file, &arguments);
         if (ret < 0)
-            INIT_FAIL("Cannot load arguments from 'loader.argv_src_file': %ld", ret);
+            INIT_FAIL("Cannot load arguments from 'loader.argv_src_file': %s", pal_strerror(ret));
 
         free(argv_src_file);
     } else if (arguments[0] && arguments[1]) {
@@ -537,8 +541,10 @@ noreturn void pal_main(uint64_t instance_id,       /* current instance id */
         /* Insert environment variables from a file. We trust the file contents (this can be
          * achieved using trusted files). */
         ret = load_cstring_array(env_src_file, &orig_environments);
-        if (ret < 0)
-            INIT_FAIL("Cannot load environment variables from 'loader.env_src_file': %ld", ret);
+        if (ret < 0) {
+            INIT_FAIL("Cannot load environment variables from 'loader.env_src_file': %s",
+                      pal_strerror(ret));
+        }
     } else {
         /* Environment variables are taken from the host. */
         orig_environments = environments;
@@ -548,9 +554,10 @@ noreturn void pal_main(uint64_t instance_id,       /* current instance id */
     // code makes this hard to implement.
     ret = build_envs(orig_environments, /*propagate=*/use_host_env || env_src_file,
                      &final_environments);
-    if (ret < 0)
+    if (ret < 0) {
         INIT_FAIL("Building the final environment based on the original environment and the "
-                  "manifest failed: %ld", ret);
+                  "manifest failed: %s", pal_strerror(ret));
+    }
 
     if (orig_environments != environments) {
         free((char*)orig_environments[0]);
@@ -574,9 +581,6 @@ noreturn void pal_main(uint64_t instance_id,       /* current instance id */
     g_pal_public_state.first_thread    = first_thread;
     g_pal_public_state.disable_aslr    = disable_aslr;
 
-    _PalGetAvailableUserAddressRange(&g_pal_public_state.user_address_start,
-                                     &g_pal_public_state.user_address_end);
-
     if (_PalGetCPUInfo(&g_pal_public_state.cpu_info) < 0) {
         goto out_fail;
     }
@@ -593,6 +597,8 @@ noreturn void pal_main(uint64_t instance_id,       /* current instance id */
     if (ret < 0)
         INIT_FAIL("Unable to load loader.entrypoint: %ld", ret);
     free(entrypoint_name);
+
+    pal_disable_early_memory_bookkeeping();
 
     /* Now we will start the execution */
     start_execution(arguments, final_environments);

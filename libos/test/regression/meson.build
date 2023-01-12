@@ -20,6 +20,7 @@ tests = {
     'exec': {},
     'exec_fork': {},
     'exec_invalid_args': {},
+    'exec_null': {},
     'exec_same': {},
     'exec_script': {},
     'exec_victim': {},
@@ -64,6 +65,7 @@ tests = {
     'mprotect_file_fork': {},
     'mprotect_prot_growsdown': {},
     'multi_pthread': {},
+    'munmap': {},
     'open_opath': {},
     'openmp': {
         # NOTE: This will use `libgomp` in GCC and `libomp` in Clang.

@@ -3,10 +3,7 @@ loader.log_level = "debug"
 loader.insecure__use_cmdline_argv = true
 
 sgx.debug = true
-
-# PAL tests use `PalVirtualMemoryAlloc(PAL_ALLOC_INTERNAL)` which must allocate in the PAL-internal
-# part of the Gramine memory
-loader.pal_internal_mem_size = "64M"
+sgx.edmm_enable = {{ 'true' if env.get('EDMM', '0') == '1' else 'false' }}
 
 sgx.nonpie_binary = true # all tests are currently non-PIE unless overridden
 

@@ -107,62 +107,37 @@ if sgx
         conf_sgx.set('CONFIG_SGX_DRIVER_UPSTREAM', true)
         sgx_driver_header = 'asm/sgx.h'
         sgx_driver_include_path_defaults = [
-            '/usr/include/',
+            # standard /usr/include[/x86_64-linux-gnu] from linux-libc-dev
+            '',
             # Ubuntu `linux-headers` package
             '/usr/src/linux-headers-@0@/arch/x86/include/uapi'.format(
                 run_command('uname', '-r').stdout().strip()),
         ]
-        sgx_driver_device_default = '/dev/sgx_enclave'
     elif sgx_driver == 'oot'
         # old non-DCAP driver (https://github.com/intel/linux-sgx-driver)
         conf_sgx.set('CONFIG_SGX_DRIVER_OOT', true)
         sgx_driver_header = 'sgx_user.h'
-        sgx_driver_device_default = '/dev/isgx'
         sgx_driver_include_path_defaults = ['/opt/intel/linux-sgx-driver']
-    elif sgx_driver == 'dcap1.6'
-        # DCAP 1.6+ but below 1.10 (https://github.com/intel/SGXDataCenterAttestationPrimitives)
-        conf_sgx.set('CONFIG_SGX_DRIVER_DCAP_1_6', true)
-        sgx_driver_header = 'uapi/asm/sgx_oot.h'
-        sgx_driver_device_default = '/dev/sgx/enclave'
-        sgx_driver_include_path_defaults = [
-            '/opt/intel/SGXDataCenterAttestationPrimitives/driver/linux/include',
-        ]
-    elif sgx_driver == 'dcap1.10'
-        # DCAP 1.10+ (https://github.com/intel/SGXDataCenterAttestationPrimitives)
-        conf_sgx.set('CONFIG_SGX_DRIVER_DCAP_1_10', true)
-        sgx_driver_header = 'sgx_user.h'
-        sgx_driver_device_default = '/dev/sgx/enclave'
-        sgx_driver_include_path_defaults = [
-            '/opt/intel/SGXDataCenterAttestationPrimitives/driver/linux/include',
-        ]
     else
         error('Unknown sgx_driver value')
     endif
 
-    if sgx_driver_device == ''
-        sgx_driver_device = sgx_driver_device_default
+    if sgx_driver_device != ''
+        conf_sgx.set_quoted('CONFIG_SGX_DRIVER_DEVICE', sgx_driver_device)
     endif
 
     if sgx_driver_include_path == ''
         foreach path : sgx_driver_include_path_defaults
-            sgx_driver_header_abspath = ''
             if cc.has_header(join_paths(path, sgx_driver_header))
                 sgx_driver_include_path = path
                 break
             endif
         endforeach
-
-        if sgx_driver_include_path == ''
-            error('Invalid SGX driver configuration (-Dsgx_driver and/or ' +
-                  '-Dsgx_driver_include_path); searched for "@0@" under directories: @1@'.format(
-                      sgx_driver_header, sgx_driver_include_path_defaults))
-        endif
     endif
 
+    sgx_driver_include = join_paths(sgx_driver_include_path, sgx_driver_header)
 
-    sgx_driver_header_abspath = join_paths(sgx_driver_include_path, sgx_driver_header)
-
-    if not cc.has_header(sgx_driver_header_abspath)
+    if not cc.has_header(sgx_driver_include)
         error('Invalid SGX driver configuration (-Dsgx_driver and/or -Dsgx_driver_include_path); ' +
               'expected "@0@" to exist under "@1@"'.format(
                   sgx_driver_header, sgx_driver_include_path))
@@ -173,8 +148,7 @@ if sgx
     vtune_sdk_path = get_option('vtune_sdk_path')
   endif
 
-    conf_sgx.set('CONFIG_SGX_DRIVER_HEADER_ABSPATH', sgx_driver_header_abspath)
-    conf_sgx.set_quoted('CONFIG_SGX_DRIVER_DEVICE', sgx_driver_device)
+    conf_sgx.set('CONFIG_SGX_DRIVER_INCLUDE', sgx_driver_include)
 endif
 
 gen_symbol_map_cmd = [
@@ -253,17 +227,26 @@ tomlc99_src = tomlc99_proj.get_variable('tomlc99_src')
 
 uthash_dep = subproject('uthash-2.1.0').get_variable('uthash_dep')
 
-mbedtls_proj = subproject('mbedtls-mbedtls-3.2.1')
+mbedtls_proj = subproject('mbedtls-mbedtls-3.3.0')
 mbedtls_static_dep = mbedtls_proj.get_variable('mbedtls_static_dep')
 mbedtls_pal_dep = mbedtls_proj.get_variable('mbedtls_pal_dep')
 
+curl_proj = subproject('curl-7.84.0')
+cjson_proj = subproject('cJSON-1.7.12')
+
 if sgx
+    # XXX: do not call subproject() from under "if sgx" conditional, because it
+    # breaks `meson dist`: `-Dsgx` checks for presence of sgx.h header and we
+    # don't want to bother with finding the header just to create a tarball
+    # TODO: this ^ probably can be revised when all distros will have the header
+    # in <asm/sgx.h> so we won't have to mess with the paths anymore
+
     protoc_c_prog = find_program('protoc-c')
     protoc_prog = find_program('protoc')
 
     threads_dep = dependency('threads')
 
-    libcurl_dep = dependency('libcurl', version: '>=7.58.0')
+    libcurl_dep = curl_proj.get_variable('curl_minimal_dep')
 
     cjson_dep = dependency('cjson', required: false)
     if not cjson_dep.found()
@@ -273,7 +256,7 @@ if sgx
     endif
     if not cjson_dep.found()
         # Ubuntu 18.04 does not have cjson at all
-        cjson_dep = subproject('cJSON-1.7.12').get_variable('cjson_dep')
+        cjson_dep = cjson_proj.get_variable('cjson_dep')
     endif
 
     protobuf_dep = dependency('libprotobuf-c')
@@ -309,7 +292,7 @@ subdir('python')
 subdir('tools')
 
 if enable_glibc
-    subproject('glibc-2.35-1')
+    subproject('glibc-2.36-1')
 endif
 if enable_musl
     subproject('musl-1.2.2')

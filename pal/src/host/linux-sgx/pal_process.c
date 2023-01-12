@@ -32,21 +32,12 @@
  * local attestation threat model (malicious host knows identities of all running SGX enclaves
  * anyway). The ISO KE protocol is proven to be secure and minimal.
  *
- * One superficial difference of the below protocol from the original ISO KE protocol is the number
- * of steps involved. Our protocol uses 5 steps (send DH's g_x, receive DH's g_y, send SGX target
- * info with identity of enclave A, receive SGX report of enclave B, send SGX report of enclave A).
- * Note here that SGX report of an enclave contains also the identity of the enclave. The original
- * ISO KE protocol uses 3 steps (send DH's g_x and identity of A, receive DH's g_y and identity of B
- * and signature of B over {g_x, g_y, A}, send signature of A over {g_y, g_x, B}). Looking at the
- * steps, it is clear that our protocol could be optimized to send 3 messages instead of 5 messages
- * and would result in the original ISO KE protocol. We implement our protocol in 5 steps purely for
- * readability.
- *
- * Another difference of the below protocol from the original ISO KE protocol is the notion of
+ * One difference of the below protocol from the original ISO KE protocol is the notion of
  * "identity". In SGX local attestation, identity of an enclave is a combination of its
  * measurements: mrenclave, attributes, configsvn, etc. This enclave identity is enclosed in the SGX
  * targetinfo struct as well as in the SGX report. Thus, we use SGX targetinfo and SGX report as
- * identities.
+ * identities. Note that in Gramine all child enclaves spawned from one parent enclave have the same
+ * SGX targetinfo (same as the parent).
  *
  * One more difference is that instead of calculating SHA256(g_x || g_y) for enclave A and
  * SHA256(g_y || g_x) for enclave B, our protocol calculates SHA256(K_e || tag1) for enclave A and
@@ -84,12 +75,12 @@
  *       and can be sent on an unencrypted channel.
  *
  *       The flow of local attestation is as follows:
- *         - Parent: Send targetinfo(Parent) to Child
  *         - Child:  Generate report(Child -> Parent) and send to Parent
  *         - Parent: Verify report(Child -> Parent)
- *         - Parent: Extract targetinfo(Child) from report(Child -> Parent)
- *                   and then generate report(Parent -> Child)
+ *         - Parent: Generate report(Parent -> Child)
  *         - Child:  Verify report(Parent -> Child)
+ *
+ *       Note that both Parent and Child have the same SGX target info.
  *
  * (3) Both the parent and child enclaves need to have matching measurements.
  *
@@ -126,15 +117,23 @@ bool is_peer_enclave_ok(sgx_report_body_t* peer_enclave_info,
     return true;
 }
 
-int _PalProcessCreate(PAL_HANDLE* handle, const char** args) {
+int _PalProcessCreate(const char** args, uintptr_t (*reserved_mem_ranges)[2],
+                      size_t reserved_mem_ranges_len, PAL_HANDLE* out_handle) {
     int stream_fd;
-    int nargs = 0, ret;
+    int nargs = 0;
 
     if (args)
         for (const char** a = args; *a; a++)
             nargs++;
 
-    ret = ocall_create_process(nargs, args, &stream_fd);
+    /*
+     * `reserved_mem_ranges` contains virtual addresses of all user memory. We do not consider this
+     * a secret information (host OS can most likely learn it anyway), so we pass it directly to the
+     * host OS. It serves merely as a hint to the initial memory allocator in PAL, so any malicious
+     * host OS modifications are irrelevant (will be detected, if anything overlaps).
+     */
+    int ret = ocall_create_process(nargs, args, reserved_mem_ranges, reserved_mem_ranges_len,
+                                   &stream_fd);
     if (ret < 0)
         return unix_to_pal_error(ret);
 
@@ -179,11 +178,12 @@ int _PalProcessCreate(PAL_HANDLE* handle, const char** args) {
         goto failed;
     }
 
-    *handle = child;
+    *out_handle = child;
     return 0;
 
 failed:
-    free(child);
+    _PalStreamDelete(child, PAL_DELETE_ALL);
+    _PalObjectClose(child);
     return ret < 0 ? ret : -PAL_ERROR_DENIED;
 }
 
@@ -238,7 +238,8 @@ int init_child_process(int parent_stream_fd, PAL_HANDLE* out_parent_handle,
     return 0;
 
 out_error:
-    free(parent);
+    _PalStreamDelete(parent, PAL_DELETE_ALL);
+    _PalObjectClose(parent);
     return ret < 0 ? ret : -PAL_ERROR_DENIED;
 }
 

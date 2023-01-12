@@ -11,6 +11,15 @@ extern uintptr_t g_enclave_top;
 
 static int64_t g_enclave_start_called = 0;
 
+/* This eats 1KB of a stack, so prevent inlining. */
+__attribute__((noinline)) static void init_xsave_size_from_report(void) {
+    __sgx_mem_aligned sgx_target_info_t target_info = { 0 };
+    alignas(128) char report_data[64] = { 0 };
+    __sgx_mem_aligned sgx_report_t report = { 0 };
+    sgx_report(&target_info, &report_data, &report);
+    init_xsave_size(report.body.attributes.xfrm);
+}
+
 /*
  * Called from enclave_entry.S to execute ecalls.
  *
@@ -69,33 +78,31 @@ void handle_ecall(long ecall_index, void* ecall_args, void* exit_target, void* e
             return;
         }
 
-        ms_ecall_enclave_start_t* ms;
-        if (!sgx_is_valid_untrusted_ptr(ecall_args, sizeof(*ms), alignof(__typeof__(*ms)))) {
+        struct ecall_enclave_start* start_args;
+        if (!sgx_is_valid_untrusted_ptr(ecall_args, sizeof(*start_args),
+                                        alignof(__typeof__(*start_args)))) {
             return;
         }
-        ms = ecall_args;
+        start_args = ecall_args;
 
         /* xsave size must be initialized early, from a trusted source (EREPORT result) */
-        // TODO: This eats 1KB of a stack frame which lives for the whole lifespan of this enclave.
-        //       We should move it somewhere else and deallocate right after use.
-        __sgx_mem_aligned sgx_target_info_t target_info;
-        alignas(128) char report_data[64] = {0};
-        __sgx_mem_aligned sgx_report_t report;
-        memset(&report, 0, sizeof(report));
-        memset(&target_info, 0, sizeof(target_info));
-        sgx_report(&target_info, &report_data, &report);
-        init_xsave_size(report.body.attributes.xfrm);
+        init_xsave_size_from_report();
 
         /* pal_linux_main is responsible for checking the passed arguments */
-        pal_linux_main(COPY_UNTRUSTED_VALUE(&ms->ms_libpal_uri),
-                       COPY_UNTRUSTED_VALUE(&ms->ms_libpal_uri_len),
-                       COPY_UNTRUSTED_VALUE(&ms->ms_args), COPY_UNTRUSTED_VALUE(&ms->ms_args_size),
-                       COPY_UNTRUSTED_VALUE(&ms->ms_env), COPY_UNTRUSTED_VALUE(&ms->ms_env_size),
-                       COPY_UNTRUSTED_VALUE(&ms->ms_parent_stream_fd),
-                       COPY_UNTRUSTED_VALUE(&ms->ms_qe_targetinfo),
-                       COPY_UNTRUSTED_VALUE(&ms->ms_topo_info),
-                       COPY_UNTRUSTED_VALUE(&ms->rpc_queue),
-                       COPY_UNTRUSTED_VALUE(&ms->ms_dns_host_conf));
+        pal_linux_main(COPY_UNTRUSTED_VALUE(&start_args->libpal_uri),
+                       COPY_UNTRUSTED_VALUE(&start_args->libpal_uri_len),
+                       COPY_UNTRUSTED_VALUE(&start_args->args),
+                       COPY_UNTRUSTED_VALUE(&start_args->args_size),
+                       COPY_UNTRUSTED_VALUE(&start_args->env),
+                       COPY_UNTRUSTED_VALUE(&start_args->env_size),
+                       COPY_UNTRUSTED_VALUE(&start_args->parent_stream_fd),
+                       COPY_UNTRUSTED_VALUE(&start_args->qe_targetinfo),
+                       COPY_UNTRUSTED_VALUE(&start_args->topo_info),
+                       COPY_UNTRUSTED_VALUE(&start_args->rpc_queue),
+                       COPY_UNTRUSTED_VALUE(&start_args->dns_host_conf),
+                       COPY_UNTRUSTED_VALUE(&start_args->edmm_enabled),
+                       COPY_UNTRUSTED_VALUE(&start_args->reserved_mem_ranges),
+                       COPY_UNTRUSTED_VALUE(&start_args->reserved_mem_ranges_size));
     } else {
         // ENCLAVE_START already called (maybe successfully, maybe not), so
         // only valid ecall is THREAD_START.

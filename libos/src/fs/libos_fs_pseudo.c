@@ -210,6 +210,9 @@ static int pseudo_istat(struct libos_dentry* dent, struct libos_inode* inode, st
     memset(buf, 0, sizeof(*buf));
     buf->st_dev = 1;
     buf->st_mode = inode->type | inode->perm;
+    buf->st_uid  = inode->uid;
+    buf->st_gid  = inode->gid;
+
     struct pseudo_node* node = inode->data;
     switch (node->type) {
         case PSEUDO_DIR: {
@@ -465,26 +468,26 @@ static int pseudo_close(struct libos_handle* hdl) {
     }
 }
 
-static int pseudo_poll(struct libos_handle* hdl, int poll_type) {
+static int pseudo_poll(struct libos_handle* hdl, int events, int* out_events) {
     struct pseudo_node* node = hdl->inode->data;
     switch (node->type) {
         case PSEUDO_STR: {
             assert(hdl->type == TYPE_STR);
             lock(&hdl->pos_lock);
             lock(&hdl->lock);
-            int ret = mem_file_poll(&hdl->info.str.mem, hdl->pos, poll_type);
+            int ret = mem_file_poll(&hdl->info.str.mem, hdl->pos, events, out_events);
             unlock(&hdl->lock);
             unlock(&hdl->pos_lock);
             return ret;
         }
 
         case PSEUDO_DEV: {
-            int ret = 0;
-            if ((poll_type & FS_POLL_RD) && node->dev.dev_ops.read)
-                ret |= FS_POLL_RD;
-            if ((poll_type & FS_POLL_WR) && node->dev.dev_ops.write)
-                ret |= FS_POLL_WR;
-            return ret;
+            *out_events = 0;
+            if (node->dev.dev_ops.read)
+                *out_events |= events & (POLLIN | POLLRDNORM);
+            if (node->dev.dev_ops.write)
+                *out_events |= events & (POLLOUT | POLLWRNORM);
+            return 0;
         }
 
         default:

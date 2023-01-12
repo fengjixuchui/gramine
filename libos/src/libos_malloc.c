@@ -42,9 +42,9 @@ void* __system_malloc(size_t size) {
         return NULL;
     }
 
-    ret = PalVirtualMemoryAlloc(&addr, alloc_size, 0, PAL_PROT_WRITE | PAL_PROT_READ);
+    ret = PalVirtualMemoryAlloc(addr, alloc_size, PAL_PROT_WRITE | PAL_PROT_READ);
     if (ret < 0) {
-        log_error("failed to allocate memory (%ld)", pal_to_unix_errno(ret));
+        log_error("failed to allocate memory: %s", pal_strerror(ret));
         void* tmp_vma = NULL;
         if (bkeep_munmap(addr, alloc_size, /*is_internal=*/true, &tmp_vma) < 0) {
             BUG();

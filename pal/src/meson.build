@@ -1,10 +1,10 @@
 cflags_pal_common = [
     '-DIN_PAL',
-    '-fno-builtin',
+    '-ffreestanding',
+    '-fPIC',
 ]
 
 pal_common_sources = files(
-    'pal_error.c',
     'pal_events.c',
     'pal_exception.c',
     'pal_main.c',

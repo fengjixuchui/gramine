@@ -33,25 +33,7 @@ struct pal_linuxsgx_state g_pal_linuxsgx_state;
 
 PAL_SESSION_KEY g_master_key = {0};
 
-/* Limit of PAL memory available for _PalVirtualMemoryAlloc(PAL_ALLOC_INTERNAL) */
-size_t g_pal_internal_mem_size = PAL_INITIAL_MEM_SIZE;
-
 const size_t g_page_size = PRESET_PAGESIZE;
-
-void _PalGetAvailableUserAddressRange(void** out_start, void** out_end) {
-    *out_start = g_pal_linuxsgx_state.heap_min;
-    *out_end   = g_pal_linuxsgx_state.heap_max;
-
-    /* Keep some heap for internal PAL objects allocated at runtime (recall that LibOS does not keep
-     * track of PAL memory, so without this limit it could overwrite internal PAL memory). See also
-     * `enclave_pages.c`. */
-    *out_end = SATURATED_P_SUB(*out_end, g_pal_internal_mem_size, *out_start);
-
-    if (*out_end <= *out_start) {
-        log_error("Not enough enclave memory, please increase enclave size!");
-        ocall_exit(1, /*is_exitgroup=*/true);
-    }
-}
 
 static bool verify_and_init_rpc_queue(void* untrusted_rpc_queue) {
     if (!untrusted_rpc_queue) {
@@ -558,21 +540,22 @@ __attribute_no_stack_protector
 noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void* uptr_args,
                              size_t args_size, void* uptr_env, size_t env_size,
                              int parent_stream_fd, void* uptr_qe_targetinfo, void* uptr_topo_info,
-                             void* uptr_rpc_queue, void* uptr_dns_conf) {
+                             void* uptr_rpc_queue, void* uptr_dns_conf, bool edmm_enabled,
+                             void* urts_reserved_mem_ranges, size_t urts_reserved_mem_ranges_size) {
     /* All our arguments are coming directly from the host. We are responsible to check them. */
     int ret;
 
     /* Relocate PAL */
     ret = setup_pal_binary();
     if (ret < 0) {
-        log_error("Relocation of the PAL binary failed: %d", ret);
+        log_error("Relocation of the PAL binary failed: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
     uint64_t start_time;
     ret = _PalSystemTimeQuery(&start_time);
     if (ret < 0) {
-        log_error("_PalSystemTimeQuery() failed: %d", ret);
+        log_error("_PalSystemTimeQuery() failed: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
@@ -584,6 +567,23 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
 
     g_pal_linuxsgx_state.heap_min = GET_ENCLAVE_TCB(heap_min);
     g_pal_linuxsgx_state.heap_max = GET_ENCLAVE_TCB(heap_max);
+    g_pal_linuxsgx_state.edmm_enabled = edmm_enabled;
+
+    /* No need for adding any initial memory ranges - they are all outside of the available memory
+     * set below. */
+    g_pal_public_state.memory_address_start = g_pal_linuxsgx_state.heap_min;
+    g_pal_public_state.memory_address_end = g_pal_linuxsgx_state.heap_max;
+
+    if (parent_stream_fd < 0) {
+        /* First process does not have reserved memory ranges. */
+        urts_reserved_mem_ranges = NULL;
+        urts_reserved_mem_ranges_size = 0;
+    }
+    ret = init_reserved_ranges(urts_reserved_mem_ranges, urts_reserved_mem_ranges_size);
+    if (ret < 0) {
+        log_error("init_reserved_ranges failed: %s", pal_strerror(ret));
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
 
     if (libpal_uri_len < URI_PREFIX_FILE_LEN) {
         log_error("Invalid libpal_uri length (missing \"%s\" prefix?)", URI_PREFIX_FILE);
@@ -611,14 +611,12 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
-    /* Set up page allocator and slab manager. There is no need to provide any initial memory pool,
-     * because the slab manager can use normal allocations (`_PalVirtualMemoryAlloc`) right away. */
-    init_slab_mgr(/*mem_pool=*/NULL, /*mem_pool_size=*/0);
+    init_slab_mgr();
 
     /* initialize enclave properties */
     ret = init_enclave();
     if (ret) {
-        log_error("Failed to initialize enclave properties: %d", ret);
+        log_error("Failed to initialize enclave properties: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
@@ -649,7 +647,7 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
 
     ret = init_cpuid();
     if (ret < 0) {
-        log_error("init_cpuid failed: %d", ret);
+        log_error("init_cpuid failed: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
@@ -658,7 +656,7 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
      * this enclave is child */
     ret = _PalRandomBitsRead(&g_master_key, sizeof(g_master_key));
     if (ret < 0) {
-        log_error("_PalRandomBitsRead failed: %d", ret);
+        log_error("_PalRandomBitsRead failed: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
@@ -667,33 +665,13 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
     uint64_t instance_id = 0;
     if (parent_stream_fd != -1) {
         if ((ret = init_child_process(parent_stream_fd, &parent, &instance_id)) < 0) {
-            log_error("Failed to initialize child process: %d", ret);
+            log_error("Failed to initialize child process: %s", pal_strerror(ret));
             ocall_exit(1, /*is_exitgroup=*/true);
         }
     }
 
     uint64_t manifest_size = GET_ENCLAVE_TCB(manifest_size);
     void* manifest_addr = (void*)(g_enclave_top - ALIGN_UP_POW2(manifest_size, g_page_size));
-
-    ret = add_preloaded_range((uintptr_t)manifest_addr, (uintptr_t)manifest_addr + manifest_size,
-                              "manifest");
-    if (ret < 0) {
-        log_error("Failed to initialize manifest preload range: %d", ret);
-        ocall_exit(1, /*is_exitgroup=*/true);
-    }
-
-    /* TOML parser (for whatever reason) allocates a lot of memory when parsing the manifest into an
-     * in-memory struct. We heuristically pre-allocate additional PAL internal memory if the
-     * manifest file looks large enough. Hopefully below sizes are sufficient for any manifest.
-     *
-     * FIXME: this is a quick hack, we need proper memory allocation in PAL. */
-    if (manifest_size > 10 * 1024 * 1024) {
-        log_always("Detected a huge manifest, preallocating 128MB of internal memory.");
-        g_pal_internal_mem_size += 128 * 1024 * 1024; /* 10MB manifest -> 64 + 128 MB PAL mem */
-    } else if (manifest_size > 5 * 1024 * 1024) {
-        log_always("Detected a huge manifest, preallocating 64MB of internal memory.");
-        g_pal_internal_mem_size += 64 * 1024 * 1024; /* 5MB manifest -> 64 + 64 MB PAL mem */
-    }
 
     /* parse manifest */
     char errbuf[256];
@@ -704,6 +682,19 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
     }
     g_pal_common_state.raw_manifest_data = manifest_addr;
     g_pal_public_state.manifest_root = manifest_root;
+
+    bool edmm_enabled_manifest;
+    ret = toml_bool_in(g_pal_public_state.manifest_root, "sgx.edmm_enable", /*defaultval=*/false,
+                       &edmm_enabled_manifest);
+    if (ret < 0) {
+        log_error("Cannot parse 'sgx.edmm_enable'");
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
+    if (edmm_enabled_manifest != edmm_enabled) {
+        log_error("edmm_enabled_manifest(=%d) != edmm_enabled(=%d)", edmm_enabled_manifest,
+                  edmm_enabled);
+        ocall_exit(1, /*is_exitgroup=*/true);
+    }
 
     int64_t rpc_thread_num;
     ret = toml_int_in(g_pal_public_state.manifest_root, "sgx.insecure__rpc_thread_num",
@@ -725,7 +716,7 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
         /* Parse, sanitize and store host topology info into g_pal_public_state struct */
         ret = import_and_sanitize_topo_info(uptr_topo_info);
         if (ret < 0) {
-            log_error("Failed to copy and sanitize topology information: %d", ret);
+            log_error("Failed to copy and sanitize topology information: %s", pal_strerror(ret));
             ocall_exit(1, /*is_exitgroup=*/true);
         }
     }
@@ -737,44 +728,31 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
         log_error("Cannot parse 'sgx.preheat_enclave' (the value must be `true` or `false`)");
         ocall_exit(1, /*is_exitgroup=*/true);
     }
-    if (preheat_enclave)
+    if (preheat_enclave) {
+        if (g_pal_linuxsgx_state.edmm_enabled) {
+            log_error("'sgx.preheat_enclave' manifest option makes no sense with EDMM enabled!");
+            ocall_exit(1, /*is_exitgroup=*/true);
+        }
         do_preheat_enclave();
-
-    /* For backward compatibility, `loader.pal_internal_mem_size` does not include
-     * PAL_INITIAL_MEM_SIZE */
-    size_t extra_mem_size;
-    ret = toml_sizestring_in(g_pal_public_state.manifest_root, "loader.pal_internal_mem_size",
-                             /*defaultval=*/0, &extra_mem_size);
-    if (ret < 0) {
-        log_error("Cannot parse 'loader.pal_internal_mem_size'");
-        ocall_exit(1, /*is_exitgroup=*/true);
     }
-
-    if (extra_mem_size + PAL_INITIAL_MEM_SIZE < g_pal_internal_mem_size) {
-        log_error("Too small `loader.pal_internal_mem_size`, need at least %luMB because the "
-                  "manifest is large",
-                  (g_pal_internal_mem_size - PAL_INITIAL_MEM_SIZE) / 1024 / 1024);
-        ocall_exit(1, /*is_exitgroup=*/true);
-    }
-    g_pal_internal_mem_size = extra_mem_size + PAL_INITIAL_MEM_SIZE;
 
     if ((ret = init_seal_key_material()) < 0) {
-        log_error("Failed to initialize SGX sealing key material: %d", ret);
+        log_error("Failed to initialize SGX sealing key material: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
     if ((ret = init_file_check_policy()) < 0) {
-        log_error("Failed to load the file check policy: %d", ret);
+        log_error("Failed to load the file check policy: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
     if ((ret = init_allowed_files()) < 0) {
-        log_error("Failed to initialize allowed files: %d", ret);
+        log_error("Failed to initialize allowed files: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
     if ((ret = init_trusted_files()) < 0) {
-        log_error("Failed to initialize trusted files: %d", ret);
+        log_error("Failed to initialize trusted files: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
 
@@ -792,7 +770,7 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
     if (parent_stream_fd < 0) {
         ret = import_and_init_extra_runtime_domain_names(uptr_dns_conf);
         if (ret < 0) {
-            log_error("Failed to initialize host info: %d", ret);
+            log_error("Failed to initialize host info: %s", unix_strerror(ret));
             ocall_exit(1, /*is_exitgroup=*/true);
         }
     }
@@ -800,7 +778,7 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
     enum sgx_attestation_type attestation_type;
     ret = parse_attestation_type(g_pal_public_state.manifest_root, &attestation_type);
     if (ret < 0) {
-        log_error("Failed to parse attestation type: %d", unix_to_pal_error(ret));
+        log_error("Failed to parse attestation type: %s", unix_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
     g_pal_public_state.attestation_type = attestation_type_to_str(attestation_type);
@@ -826,7 +804,7 @@ noreturn void pal_linux_main(void* uptr_libpal_uri, size_t libpal_uri_len, void*
     uint64_t stack_protector_canary;
     ret = _PalRandomBitsRead(&stack_protector_canary, sizeof(stack_protector_canary));
     if (ret < 0) {
-        log_error("_PalRandomBitsRead failed: %d", ret);
+        log_error("_PalRandomBitsRead failed: %s", pal_strerror(ret));
         ocall_exit(1, /*is_exitgroup=*/true);
     }
     pal_set_tcb_stack_canary(stack_protector_canary);

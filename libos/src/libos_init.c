@@ -5,8 +5,6 @@
  * This file contains entry and exit functions of library OS.
  */
 
-#include <sys/mman.h>
-
 #include "api.h"
 #include "hex.h"
 #include "init.h"
@@ -83,6 +81,8 @@ long pal_to_unix_errno(long err) {
     return -pal_to_unix_errno_positive((unsigned long)-err);
 }
 
+bool g_received_user_memory = false;
+
 void* migrated_memory_start;
 void* migrated_memory_end;
 
@@ -93,7 +93,7 @@ const char* const* migrated_envp __attribute_migratable;
  * allocated, its memory is never freed or updated. */
 char** g_library_paths = NULL;
 
-void* allocate_stack(size_t size, size_t protect_size, bool user) {
+static void* allocate_stack(size_t size, size_t protect_size, bool user) {
     void* stack = NULL;
 
     size = ALLOC_ALIGN_UP(size);
@@ -118,7 +118,7 @@ void* allocate_stack(size_t size, size_t protect_size, bool user) {
     }
 
     bool need_mem_free = false;
-    ret = PalVirtualMemoryAlloc(&stack, size + protect_size, 0, /*prot=*/0);
+    ret = PalVirtualMemoryAlloc(stack, size + protect_size, /*prot=*/0);
     if (ret < 0) {
         goto out_fail;
     }
@@ -361,7 +361,8 @@ static int read_environs(const char* const* envp) {
     do {                                                                    \
         int _err = CALL_INIT(func, ##__VA_ARGS__);                          \
         if (_err < 0) {                                                     \
-            log_error("Error during libos_init() in " #func " (%d)", _err); \
+            log_error("libos_init() failed in " #func ": %s",               \
+                      unix_strerror(_err));                                 \
             PalProcessExit(1);                                              \
         }                                                                   \
     } while (0)
@@ -383,13 +384,18 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
     log_debug("Host: %s", g_pal_public_state->host_type);
 
     if (!IS_POWER_OF_2(ALLOC_ALIGNMENT)) {
-        log_error("Error during libos_init(): PAL allocation alignment not a power of 2");
+        log_error("PAL allocation alignment not a power of 2");
         PalProcessExit(1);
     }
 
     g_manifest_root = g_pal_public_state->manifest_root;
 
     libos_xstate_init();
+
+    if (!g_pal_public_state->parent_process) {
+        /* No parent process - we never receive any memory. */
+        g_received_user_memory = true;
+    }
 
     RUN_INIT(init_vma);
     RUN_INIT(init_slab);
@@ -408,7 +414,8 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
 
         int ret = read_exact(g_pal_public_state->parent_process, &hdr, sizeof(hdr));
         if (ret < 0) {
-            log_error("libos_init: failed to read the whole checkpoint header: %d", ret);
+            log_error("libos_init: failed to read the whole checkpoint header: %s",
+                      unix_strerror(ret));
             PalProcessExit(1);
         }
 
@@ -420,8 +427,8 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
 
     RUN_INIT(init_ipc);
     RUN_INIT(init_process);
-    RUN_INIT(init_mount_root);
     RUN_INIT(init_threading);
+    RUN_INIT(init_mount_root);
     RUN_INIT(init_mount);
     RUN_INIT(init_std_handles);
 
@@ -451,7 +458,8 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
     if (g_pal_public_state->parent_process) {
         int ret = connect_to_process(g_process_ipc_ids.parent_vmid);
         if (ret < 0) {
-            log_error("libos_init: failed to establish IPC connection to parent: %d", ret);
+            log_error("libos_init: failed to establish IPC connection to parent: %s",
+                      unix_strerror(ret));
             PalProcessExit(1);
         }
 
@@ -460,7 +468,8 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
         IDTYPE dummy = 0;
         ret = ipc_get_id_owner(/*id=*/0, /*out_owner=*/&dummy);
         if (ret < 0) {
-            log_debug("libos_init: failed to get a connection from IPC leader to us: %d", ret);
+            log_debug("libos_init: failed to get a connection from IPC leader to us: %s",
+                      unix_strerror(ret));
             PalProcessExit(1);
         }
         assert(dummy == 0); // Nobody should own ID `0`.
@@ -469,14 +478,16 @@ noreturn void libos_init(const char* const* argv, const char* const* envp) {
         char dummy_c = 0;
         ret = write_exact(g_pal_public_state->parent_process, &dummy_c, sizeof(dummy_c));
         if (ret < 0) {
-            log_error("libos_init: failed to write ready notification: %d", ret);
+            log_error("libos_init: failed to write ready notification: %s",
+                      unix_strerror(ret));
             PalProcessExit(1);
         }
 
         /* Wait for parent to settle its adult things. */
         ret = read_exact(g_pal_public_state->parent_process, &dummy_c, sizeof(dummy_c));
         if (ret < 0) {
-            log_error("libos_init: failed to read parent's confirmation: %d", ret);
+            log_error("libos_init: failed to read parent's confirmation: %s",
+                      unix_strerror(ret));
             PalProcessExit(1);
         }
     } else { /* !g_pal_public_state->parent_process */

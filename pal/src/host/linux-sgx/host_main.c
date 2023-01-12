@@ -17,8 +17,8 @@
 #include "host_ecalls.h"
 #include "host_internal.h"
 #include "host_log.h"
+#include "host_process.h"
 #include "linux_utils.h"
-#include "pal_internal_arch.h"
 #include "pal_linux_defs.h"
 #include "pal_linux_error.h"
 #include "pal_rpc_queue.h"
@@ -174,7 +174,7 @@ static int load_enclave_binary(sgx_arch_secs_t* secs, int fd, unsigned long base
 
             ret = add_pages_to_enclave(secs, (void*)base + c->mapstart, addr,
                                        c->mapend - c->mapstart,
-                                       SGX_PAGE_REG, c->prot, /*skip_eextend=*/false,
+                                       SGX_PAGE_TYPE_REG, c->prot, /*skip_eextend=*/false,
                                        (c->prot & PROT_EXEC) ? "code" : "data");
 
             DO_SYSCALL(munmap, addr, c->mapend - c->mapstart);
@@ -185,7 +185,7 @@ static int load_enclave_binary(sgx_arch_secs_t* secs, int fd, unsigned long base
 
         if (zeroend > zeropage) {
             ret = add_pages_to_enclave(secs, (void*)base + zeropage, NULL, zeroend - zeropage,
-                                       SGX_PAGE_REG, c->prot, false, "bss");
+                                       SGX_PAGE_TYPE_REG, c->prot, false, "bss");
             if (ret < 0)
                 goto out;
         }
@@ -201,7 +201,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
     int ret = 0;
     int enclave_image = -1;
     sgx_arch_token_t enclave_token;
-    sgx_arch_enclave_css_t enclave_sigstruct;
+    sgx_sigstruct_t enclave_sigstruct;
     sgx_arch_secs_t enclave_secs;
     unsigned long enclave_entry_addr;
     unsigned long enclave_heap_min;
@@ -266,7 +266,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
 
     ret = read_enclave_token(token_fd, &enclave_token);
     if (ret < 0) {
-        log_error("Reading enclave token failed: %d", ret);
+        log_error("Reading enclave token failed: %s", unix_strerror(ret));
         goto out;
     }
 
@@ -293,7 +293,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
 
     ret = read_enclave_sigstruct(sigfile_fd, &enclave_sigstruct);
     if (ret < 0) {
-        log_error("Reading enclave sigstruct failed: %d", ret);
+        log_error("Reading enclave sigstruct failed: %s", unix_strerror(ret));
         goto out;
     }
 
@@ -302,7 +302,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
     enclave_secs.size = enclave->size;
     ret = create_enclave(&enclave_secs, &enclave_token);
     if (ret < 0) {
-        log_error("Creating enclave failed: %d", ret);
+        log_error("Creating enclave failed: %s", unix_strerror(ret));
         goto out;
     }
 
@@ -342,7 +342,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
     areas = (struct mem_area*)DO_SYSCALL(mmap, NULL, areas_size, PROT_READ | PROT_WRITE,
                                          MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
     if (IS_PTR_ERR(areas)) {
-        log_error("Allocating memory failed (%ld)", PTR_TO_ERR(areas));
+        log_error("Allocating memory failed: %s", unix_strerror(PTR_TO_ERR(areas)));
         areas = NULL;
         ret = -ENOMEM;
         goto out;
@@ -362,7 +362,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                                         .addr         = 0,
                                         .size         = ALLOC_ALIGN_UP(manifest_size),
                                         .prot         = PROT_READ,
-                                        .type         = SGX_PAGE_REG};
+                                        .type         = SGX_PAGE_TYPE_REG};
     area_num++;
 
     areas[area_num] =
@@ -373,7 +373,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                           .size         = enclave->thread_num * enclave->ssa_frame_size *
                                               SSA_FRAME_NUM,
                           .prot         = PROT_READ | PROT_WRITE,
-                          .type         = SGX_PAGE_REG};
+                          .type         = SGX_PAGE_TYPE_REG};
     struct mem_area* ssa_area = &areas[area_num++];
 
     areas[area_num] = (struct mem_area){.desc = "tcs",
@@ -382,7 +382,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                                         .addr         = 0,
                                         .size         = enclave->thread_num * g_page_size,
                                         .prot         = PROT_READ | PROT_WRITE,
-                                        .type         = SGX_PAGE_TCS};
+                                        .type         = SGX_PAGE_TYPE_TCS};
     struct mem_area* tcs_area = &areas[area_num++];
 
     areas[area_num] = (struct mem_area){.desc         = "tls",
@@ -391,7 +391,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                                         .addr         = 0,
                                         .size         = enclave->thread_num * g_page_size,
                                         .prot         = PROT_READ | PROT_WRITE,
-                                        .type         = SGX_PAGE_REG};
+                                        .type         = SGX_PAGE_TYPE_REG};
     struct mem_area* tls_area = &areas[area_num++];
 
     struct mem_area* stack_areas = &areas[area_num]; /* memorize for later use */
@@ -402,7 +402,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                                             .addr         = 0,
                                             .size         = ENCLAVE_STACK_SIZE,
                                             .prot         = PROT_READ | PROT_WRITE,
-                                            .type         = SGX_PAGE_REG};
+                                            .type         = SGX_PAGE_TYPE_REG};
         area_num++;
     }
 
@@ -414,7 +414,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                                             .addr         = 0,
                                             .size         = ENCLAVE_SIG_STACK_SIZE,
                                             .prot         = PROT_READ | PROT_WRITE,
-                                            .type         = SGX_PAGE_REG};
+                                            .type         = SGX_PAGE_TYPE_REG};
         area_num++;
     }
 
@@ -424,12 +424,12 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                                         .fd           = enclave_image,
                                         /* `addr` and `size` are set below */
                                         .prot         = 0,
-                                        .type         = SGX_PAGE_REG};
+                                        .type         = SGX_PAGE_TYPE_REG};
     struct mem_area* pal_area = &areas[area_num++];
 
     ret = scan_enclave_binary(enclave_image, &pal_area->addr, &pal_area->size, &enclave_entry_addr);
     if (ret < 0) {
-        log_error("Scanning PAL binary (%s) failed: %d", enclave->libpal_uri, ret);
+        log_error("Scanning PAL binary (%s) failed: %s", enclave->libpal_uri, unix_strerror(ret));
         goto out;
     }
 
@@ -451,7 +451,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
                                             .addr         = enclave_heap_min,
                                             .size         = last_populated_addr - enclave_heap_min,
                                             .prot         = PROT_READ | PROT_WRITE | PROT_EXEC,
-                                            .type         = SGX_PAGE_REG};
+                                            .type         = SGX_PAGE_TYPE_REG};
         free_area = &areas[area_num++];
     }
 
@@ -460,9 +460,15 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
         if (areas[i].data_src == ELF_FD) {
             ret = load_enclave_binary(&enclave_secs, areas[i].fd, areas[i].addr, areas[i].prot);
             if (ret < 0) {
-                log_error("Loading enclave binary failed: %d", ret);
+                log_error("Loading enclave binary failed: %s", unix_strerror(ret));
                 goto out;
             }
+            continue;
+        }
+
+        if (areas[i].skip_eextend && enclave->edmm_enabled) {
+            assert(areas[i].data_src == ZERO);
+            /* If EDMM is enabled, no need to add non-measured zero pages. */
             continue;
         }
 
@@ -526,7 +532,8 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
             DO_SYSCALL(munmap, data, areas[i].size);
 
         if (ret < 0) {
-            log_error("Adding pages (%s) to enclave failed: %d", areas[i].desc, ret);
+            log_error("Adding pages (%s) to enclave failed: %s", areas[i].desc,
+                      unix_strerror(ret));
             goto out;
         }
     }
@@ -534,7 +541,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
 
     ret = init_enclave(&enclave_secs, &enclave_sigstruct, &enclave_token);
     if (ret < 0) {
-        log_error("Initializing enclave failed: %d", ret);
+        log_error("Initializing enclave failed: %s", unix_strerror(ret));
         goto out;
     }
 
@@ -562,7 +569,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
         /* set TCS.FLAGS.DBGOPTIN in all enclave threads to enable perf counters, Intel PT, etc */
         ret = DO_SYSCALL(open, "/proc/self/mem", O_RDWR | O_LARGEFILE | O_CLOEXEC, 0);
         if (ret < 0) {
-            log_error("Setting TCS.FLAGS.DBGOPTIN failed: %d", ret);
+            log_error("Setting TCS.FLAGS.DBGOPTIN failed: %s", unix_strerror(ret));
             goto out;
         }
         enclave_mem = ret;
@@ -574,7 +581,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
             ret = DO_SYSCALL(pread64, enclave_mem, &tcs_flags, sizeof(tcs_flags),
                              (off_t)tcs_flags_ptr);
             if (ret < 0) {
-                log_error("Reading TCS.FLAGS.DBGOPTIN failed: %d", ret);
+                log_error("Reading TCS.FLAGS.DBGOPTIN failed: %s", unix_strerror(ret));
                 goto out;
             }
 
@@ -583,7 +590,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
             ret = DO_SYSCALL(pwrite64, enclave_mem, &tcs_flags, sizeof(tcs_flags),
                              (off_t)tcs_flags_ptr);
             if (ret < 0) {
-                log_error("Writing TCS.FLAGS.DBGOPTIN failed: %d", ret);
+                log_error("Writing TCS.FLAGS.DBGOPTIN failed: %s", unix_strerror(ret));
                 goto out;
             }
         }
@@ -603,7 +610,7 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
 #endif
 
 #ifdef ASAN
-    if (free_area)
+    if (free_area && !enclave->edmm_enabled)
         asan_poison_region(free_area->addr, free_area->size, ASAN_POISON_USER);
 #else
     __UNUSED(free_area);
@@ -656,6 +663,14 @@ static int parse_loader_config(char* manifest, struct pal_enclave* enclave_info,
         goto out;
     }
 
+    ret = toml_bool_in(manifest_root, "sgx.edmm_enable", /*defaultval=*/false,
+                       &enclave_info->edmm_enabled);
+    if (ret < 0) {
+        log_error("Cannot parse 'sgx.edmm_enable'");
+        ret = -EINVAL;
+        goto out;
+    }
+
     if (!enclave_info->size || !IS_POWER_OF_2(enclave_info->size)) {
         log_error("Enclave size not a power of two (an SGX-imposed requirement)");
         ret = -EINVAL;
@@ -663,26 +678,41 @@ static int parse_loader_config(char* manifest, struct pal_enclave* enclave_info,
     }
 
     int64_t thread_num_int64;
-    ret = toml_int_in(manifest_root, "sgx.thread_num", /*defaultval=*/0, &thread_num_int64);
+    ret = toml_int_in(manifest_root, "sgx.max_threads", /*defaultval=*/-1, &thread_num_int64);
     if (ret < 0) {
-        log_error("Cannot parse 'sgx.thread_num'");
+        log_error("Cannot parse 'sgx.max_threads'");
         ret = -EINVAL;
         goto out;
     }
 
     if (thread_num_int64 < 0) {
-        log_error("Negative 'sgx.thread_num' is impossible");
+        /* TODO: sgx.thread_num is deprecated in v1.4, remove in v1.5 */
+        ret = toml_int_in(manifest_root, "sgx.thread_num", /*defaultval=*/-1, &thread_num_int64);
+        if (ret < 0) {
+            log_error("Cannot parse 'sgx.thread_num'");
+            ret = -EINVAL;
+            goto out;
+        }
+        if (thread_num_int64 < 0) {
+            log_error("'sgx.max_threads' not found in the manifest");
+            ret = -EINVAL;
+            goto out;
+        }
+        log_error("Detected deprecated syntax: 'sgx.thread_num'. Consider switching to "
+                  "'sgx.max_threads'.");
+    }
+
+    if (!thread_num_int64) {
+        log_error("'sgx.max_threads' must be a positive number");
         ret = -EINVAL;
         goto out;
     }
-
-    enclave_info->thread_num = thread_num_int64 ?: 1;
-
-    if (enclave_info->thread_num > MAX_DBG_THREADS) {
-        log_error("Too large 'sgx.thread_num', maximum allowed is %d", MAX_DBG_THREADS);
+    if (thread_num_int64 > MAX_DBG_THREADS) {
+        log_error("Too large 'sgx.max_threads', maximum allowed is %d", MAX_DBG_THREADS);
         ret = -EINVAL;
         goto out;
     }
+    enclave_info->thread_num = thread_num_int64;
 
     int64_t rpc_thread_num_int64;
     ret = toml_int_in(manifest_root, "sgx.insecure__rpc_thread_num", /*defaultval=*/0,
@@ -699,14 +729,13 @@ static int parse_loader_config(char* manifest, struct pal_enclave* enclave_info,
         goto out;
     }
 
-    enclave_info->rpc_thread_num = rpc_thread_num_int64;
-
-    if (enclave_info->rpc_thread_num > MAX_RPC_THREADS) {
+    if (rpc_thread_num_int64 > MAX_RPC_THREADS) {
         log_error("Too large 'sgx.insecure__rpc_thread_num', maximum allowed is %d",
                   MAX_RPC_THREADS);
         ret = -EINVAL;
         goto out;
     }
+    enclave_info->rpc_thread_num = rpc_thread_num_int64;
 
     if (enclave_info->rpc_thread_num && enclave_info->thread_num > RPC_QUEUE_SIZE) {
         log_error("Too many threads for exitless feature (more than capacity of RPC queue)");
@@ -886,7 +915,7 @@ static int parse_loader_config(char* manifest, struct pal_enclave* enclave_info,
         ret = host_log_init(log_file);
 
         if (ret < 0) {
-            log_error("Cannot open log file: %d", ret);
+            log_error("Cannot open log file: %s", unix_strerror(ret));
             goto out;
         }
     }
@@ -916,7 +945,8 @@ out:
 /* Warning: This function does not free up resources on failure - it assumes that the whole process
  * exits after this function's failure. */
 static int load_enclave(struct pal_enclave* enclave, char* args, size_t args_size, char* env,
-                        size_t env_size, int parent_stream_fd, bool need_gsgx) {
+                        size_t env_size, int parent_stream_fd,
+                        void* reserved_mem_ranges, size_t reserved_mem_ranges_size) {
     int ret;
     struct timeval tv;
     struct pal_topo_info topo_info = {0};
@@ -937,7 +967,7 @@ static int load_enclave(struct pal_enclave* enclave, char* args, size_t args_siz
     }
     log_debug("Gramine parsed TOML manifest file successfully");
 
-    ret = open_sgx_driver(need_gsgx);
+    ret = open_sgx_driver();
     if (ret < 0)
         return ret;
 
@@ -1022,20 +1052,13 @@ static int load_enclave(struct pal_enclave* enclave, char* args, size_t args_siz
 
     /* start running trusted PAL */
     ecall_enclave_start(enclave->libpal_uri, args, args_size, env, env_size, parent_stream_fd,
-                        &qe_targetinfo, &topo_info, &dns_conf);
+                        &qe_targetinfo, &topo_info, &dns_conf, enclave->edmm_enabled,
+                        reserved_mem_ranges, reserved_mem_ranges_size);
 
     unmap_tcs();
     DO_SYSCALL(munmap, alt_stack, ALT_STACK_SIZE);
     DO_SYSCALL(exit, 0);
     die_or_inf_loop();
-}
-
-/* Grow the stack of the main thread to THREAD_STACK_SIZE by probing each stack page above current
- * stack pointer (Linux dynamically grows the stack of the main thread but gets confused with
- * huge-jump stack accesses coming from within the enclave). Note that other, non-main threads
- * are created manually via clone(.., THREAD_STACK_SIZE, ..) and thus do not need this hack. */
-static void force_linux_to_grow_stack(void) {
-    ARCH_PROBE_STACK(THREAD_STACK_SIZE, PRESET_PAGESIZE);
 }
 
 noreturn static void print_usage_and_exit(const char* argv_0) {
@@ -1082,7 +1105,7 @@ static void setup_asan(void) {
                                    /*fd=*/-1, /*offset=*/0);
     if (IS_PTR_ERR(addr)) {
         int err = PTR_TO_ERR(addr);
-        log_error("asan: error setting up shadow memory: %d", err);
+        log_error("asan: error setting up shadow memory: %s", unix_strerror(err));
         DO_SYSCALL(exit_group, unix_to_pal_error(err));
         die_or_inf_loop();
     }
@@ -1093,8 +1116,9 @@ __attribute_no_sanitize_address
 int main(int argc, char* argv[], char* envp[]) {
     char* manifest_path = NULL;
     int ret = 0;
-    bool need_gsgx = true;
     char* manifest = NULL;
+    void* reserved_mem_ranges = NULL;
+    size_t reserved_mem_ranges_size = 0;
 
 #ifdef DEBUG
     ret = debug_map_init_from_proc_maps();
@@ -1104,7 +1128,13 @@ int main(int argc, char* argv[], char* envp[]) {
     }
 #endif
 
-    force_linux_to_grow_stack();
+    /* Grow the stack of the main thread to THREAD_STACK_SIZE by probing each stack page above
+     * the current stack pointer (Linux dynamically grows the stack of the main thread but gets
+     * confused with huge-jump stack accesses coming from within the enclave). Note that other,
+     * non-main threads do not have growing stacks and thus do not need this hack. */
+    static_assert(THREAD_STACK_SIZE % PAGE_SIZE == 0, "");
+    probe_stack(THREAD_STACK_SIZE / PAGE_SIZE);
+
 
     if (argc < 4)
         print_usage_and_exit(argv[0]);
@@ -1116,10 +1146,11 @@ int main(int argc, char* argv[], char* envp[]) {
         return -ENOMEM;
     }
 
-    /* check whether host kernel supports FSGSBASE feature, otherwise we need the GSGX driver */
     uint64_t at_hwcap2;
-    if (get_aux_value(envp, AT_HWCAP2, &at_hwcap2) == 0 && (at_hwcap2 & 0x2)) {
-        need_gsgx = false;
+    if (get_aux_value(envp, AT_HWCAP2, &at_hwcap2) != 0 || !(at_hwcap2 & 0x2)) {
+        log_error("Gramine with Linux-SGX backend requires support for FSGSBASE CPU instructions "
+                  "in the host kernel. Please update your system.");
+        return -EINVAL;
     }
 
     g_libpal_path = strdup(argv[1]);
@@ -1163,7 +1194,8 @@ int main(int argc, char* argv[], char* envp[]) {
             return ret;
         }
 
-        ret = sgx_init_child_process(parent_stream_fd, &g_pal_enclave.application_path, &manifest);
+        ret = sgx_init_child_process(parent_stream_fd, &g_pal_enclave.application_path, &manifest,
+                                     &reserved_mem_ranges, &reserved_mem_ranges_size);
         if (ret < 0)
             return ret;
     }
@@ -1191,9 +1223,10 @@ int main(int argc, char* argv[], char* envp[]) {
     char* env = envp[0];
     size_t env_size = envc > 0 ? (envp[envc - 1] - envp[0]) + strlen(envp[envc - 1]) + 1 : 0;
 
-    ret = load_enclave(&g_pal_enclave, args, args_size, env, env_size, parent_stream_fd, need_gsgx);
+    ret = load_enclave(&g_pal_enclave, args, args_size, env, env_size, parent_stream_fd,
+                       reserved_mem_ranges, reserved_mem_ranges_size);
     if (ret < 0) {
-        log_error("load_enclave() failed with error %d", ret);
+        log_error("load_enclave() failed with error: %s", unix_strerror(ret));
     }
     return 0;
 }

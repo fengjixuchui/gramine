@@ -104,28 +104,29 @@ bool getenv_allow_debug_enclave(void) {
     return (str && !strcmp(str, "1"));
 }
 
-/*! searches for specific \p oid among \p exts and returns pointer to its value in \p val */
-int find_oid(const uint8_t* exts, size_t exts_len, const uint8_t* oid, size_t oid_len,
-             uint8_t** val, size_t* len) {
+/*! searches for specific \p oid among \p exts and returns pointer to its value in \p out_val;
+ *  tailored for SGX quotes with size strictly from 128 to 65535 bytes (fails on other sizes) */
+static int find_oid(const uint8_t* exts, size_t exts_size, const uint8_t* oid, size_t oid_size,
+                    uint8_t** out_val, size_t* out_size) {
     /* TODO: searching with memmem is not robust (what if some extension contains exactly these
      *       chars?), but mbedTLS has nothing generic enough for our purposes; this is still
      *       secure because this func is used for extracting the SGX quote which is verified
      *       later, but may lead to unexpected failures (hardly possible in real world though) */
-    uint8_t* p = memmem(exts, exts_len, oid, oid_len);
+    uint8_t* p = memmem(exts, exts_size, oid, oid_size);
     if (!p)
         return MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
 
-    const uint8_t* exts_end = exts + exts_len;
+    const uint8_t* exts_end = exts + exts_size;
 
-    /* move pointer past OID string and to the OID value */
-    p += oid_len;
+    /* move pointer past OID string and to the OID value (which is encoded in ASN.1 DER) */
+    p += oid_size;
 
     if (p >= exts_end)
         return MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
 
     if (*p == 0x01) {
-        /* some TLS libs generate a BOOLEAN for the criticality of the extension before the
-         * extension value itself; check its value and skip it */
+        /* some TLS libs generate a BOOLEAN (ASN.1 tag 1) for the criticality of the extension
+         * before the extension value itself; check its value and skip it */
         p++;
         if (p >= exts_end || *p++ != 0x01) {
             /* BOOLEAN length must be 0x01 */
@@ -137,39 +138,51 @@ int find_oid(const uint8_t* exts, size_t exts_len, const uint8_t* oid, size_t oi
         }
     }
 
-    /* now comes the octet string */
+    /* now comes the octet string containing the SGX quote (ASN.1 tag 4) */
     if (p >= exts_end || *p++ != 0x04) {
-        /* tag for octet string must be 0x04 */
         return MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
     }
     if (p >= exts_end || *p++ != 0x82) {
-        /* length of octet string must be 0x82 (encoded in two bytes) */
+        /* length of octet string must be 0x82 = 0b10000010 (the long form, with bit 8 set and bits
+         * 7-0 indicating how many more bytes are in the length field); SGX quotes always have
+         * lengths of 128 to 65535 bytes, so length must be encoded in exactly two bytes */
         return MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
     }
+    static_assert(sizeof(sgx_quote_t) >= 128, "need to change ASN.1 length-of-octet-string limit");
+    static_assert(SGX_QUOTE_MAX_SIZE <= 65535, "need to change ASN.1 length-of-octet-string limit");
 
-    if (p + 2 >= exts_end)
+    if (p + 2 > exts_end)
         return MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
 
-    *len   = *p++;
-    *len <<= 8;
-    *len  += *p++;
+    size_t val_size;
+    val_size = *p++;
+    val_size <<= 8;
+    val_size += *p++;
 
-    *val = p;
+    uint8_t* val = p;
 
-    if (*len > SGX_QUOTE_MAX_SIZE || *val + *len > exts_end)
+    assert(val <= exts_end);
+    if (val_size < 128 || val_size > SGX_QUOTE_MAX_SIZE || val_size > (size_t)(exts_end - val))
         return MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
 
+    *out_size = val_size;
+    *out_val  = val;
     return 0;
 }
 
 /*! calculate sha256 over public key from \p crt and copy it into \p sha */
 static int sha256_over_crt_pk(mbedtls_x509_crt* crt, uint8_t* sha) {
+    mbedtls_ecp_keypair* key = mbedtls_pk_ec(crt->pk);
+    if (key == NULL || key->MBEDTLS_PRIVATE(grp).id != MBEDTLS_ECP_DP_SECP384R1) {
+        return MBEDTLS_ERR_PK_BAD_INPUT_DATA;
+    }
+
     uint8_t pk_der[PUB_KEY_SIZE_MAX] = {0};
 
     /* below function writes data at the end of the buffer */
-    int pk_der_size_byte = mbedtls_pk_write_pubkey_der(&crt->pk, pk_der, PUB_KEY_SIZE_MAX);
-    if (pk_der_size_byte != RSA_PUB_3072_KEY_DER_LEN)
-        return MBEDTLS_ERR_PK_INVALID_PUBKEY;
+    int pk_der_size_byte = mbedtls_pk_write_pubkey_der(&crt->pk, pk_der, sizeof(pk_der));
+    if (pk_der_size_byte < 0)
+        return pk_der_size_byte;
 
     /* move the data to the beginning of the buffer, to avoid pointer arithmetic later */
     memmove(pk_der, pk_der + PUB_KEY_SIZE_MAX - pk_der_size_byte, pk_der_size_byte);
@@ -190,6 +203,28 @@ int cmp_crt_pk_against_quote_report_data(mbedtls_x509_crt* crt, sgx_quote_t* quo
     if (ret)
         return MBEDTLS_ERR_X509_SIG_MISMATCH;
 
+    return 0;
+}
+
+int extract_quote_and_verify_pubkey(mbedtls_x509_crt* crt, sgx_quote_t** out_quote,
+                                    size_t* out_quote_size) {
+    sgx_quote_t* quote;
+    size_t quote_size;
+    int ret = find_oid(crt->v3_ext.p, crt->v3_ext.len, g_quote_oid, g_quote_oid_size,
+                       (uint8_t**)&quote, &quote_size);
+    if (ret < 0)
+        return ret;
+
+    if (quote_size < sizeof(*quote))
+        return MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
+
+    /* currently only one check: public key's hash from cert must match SGX quote's report_data */
+    ret = cmp_crt_pk_against_quote_report_data(crt, quote);
+    if (ret < 0)
+        return ret;
+
+    *out_quote = quote;
+    *out_quote_size = quote_size;
     return 0;
 }
 

@@ -67,9 +67,13 @@ int init_vma(void);
  *
  * Such a way of freeing is needed, so that no other thread will map the same memory in the window
  * between `bkeep_munmap` and `PalVirtualMemoryFree`.
+ * `bkeep_convert_tmp_vma_to_user` can be called instead of `bkeep_remove_tmp_vma` to convert
+ * the VMA to unmapped user VMA, instead of removing it. See `MMAP_FIXED` implementation for example
+ * usage.
  */
 int bkeep_munmap(void* addr, size_t length, bool is_internal, void** tmp_vma_ptr);
 void bkeep_remove_tmp_vma(void* vma);
+void bkeep_convert_tmp_vma_to_user(void* vma);
 
 /* Bookkeeping a change to memory protections. */
 int bkeep_mprotect(void* addr, size_t length, int prot, bool is_internal);
@@ -93,11 +97,11 @@ int bkeep_mmap_any_in_range(void* bottom_addr, void* top_addr, size_t length, in
                             void** ret_val_ptr);
 
 /* Shorthand for `bkeep_mmap_any_in_range` with the range
- * [`g_pal_public_state->user_address_start`, `g_pal_public_state->user_address_end`). */
+ * [`g_pal_public_state->memory_address_start`, `g_pal_public_state->memory_address_end`). */
 int bkeep_mmap_any(size_t length, int prot, int flags, struct libos_handle* file, uint64_t offset,
                    const char* comment, void** ret_val_ptr);
 
-/* First tries to bookkeep in the range [`g_pal_public_state->user_address_start`, `aslr_addr_top`)
+/* First tries to bookkeep in [`g_pal_public_state->memory_address_start`, `aslr_addr_top`) range
  * and if it fails calls `bkeep_mmap_any`. `aslr_addr_top` is a value randomized on each program
  * run. */
 int bkeep_mmap_any_aslr(size_t length, int prot, int flags, struct libos_handle* file,
@@ -117,7 +121,12 @@ bool is_in_adjacent_user_vmas(const void* addr, size_t length, int prot);
  * `*count`. On error returns negated error code.
  * The returned array can be subsequently freed by `free_vma_info_array`.
  */
-int dump_all_vmas(struct libos_vma_info** vma_infos, size_t* count, bool include_unmapped);
+int dump_all_vmas(bool include_unmapped, struct libos_vma_info** ret_infos, size_t* ret_count);
+/*
+ * Same as `dump_all_vmas`, but dumps only in `[begin; end)` range.
+ */
+int dump_vmas_in_range(uintptr_t begin, uintptr_t end, bool include_unmapped,
+                       struct libos_vma_info** ret_infos, size_t* ret_count);
 void free_vma_info_array(struct libos_vma_info* vma_infos, size_t count);
 
 /* Implementation of madvise(MADV_DONTNEED) syscall */
@@ -133,3 +142,6 @@ void debug_print_all_vmas(void);
 
 /* Returns the peak amount of memory usage */
 size_t get_peak_memory_usage(void);
+
+/* Returns total memory usage */
+size_t get_total_memory_usage(void);

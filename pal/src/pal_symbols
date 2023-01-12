@@ -1,6 +1,7 @@
 PalVirtualMemoryAlloc
 PalVirtualMemoryFree
 PalVirtualMemoryProtect
+PalSetMemoryBookkeepingUpcalls
 PalThreadCreate
 PalThreadYieldExecution
 PalThreadExit
@@ -43,7 +44,6 @@ PalSegmentBaseGet
 PalSegmentBaseSet
 PalStreamChangeName
 PalStreamAttributesSetByHandle
-PalMemoryAvailableQuota
 PalDebugMapAdd
 PalDebugMapRemove
 PalDebugDescribeLocation

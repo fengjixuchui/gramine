@@ -118,20 +118,11 @@ int ra_tls_verify_callback(void* data, mbedtls_x509_crt* crt, int depth, uint32_
     /* extract SGX quote from "quote" OID extension from crt */
     sgx_quote_t* quote;
     size_t quote_size;
-    ret = find_oid(crt->v3_ext.p, crt->v3_ext.len, quote_oid, quote_oid_len, (uint8_t**)&quote,
-                   &quote_size);
-    if (ret < 0)
-        goto out;
-
-    if (quote_size < sizeof(*quote)) {
-        ret = MBEDTLS_ERR_X509_INVALID_EXTENSIONS;
+    ret = extract_quote_and_verify_pubkey(crt, &quote, &quote_size);
+    if (ret < 0) {
+        ERROR("extract_quote_and_verify_pubkey failed: %d\n", ret);
         goto out;
     }
-
-    /* compare public key's hash from cert against quote's report_data */
-    ret = cmp_crt_pk_against_quote_report_data(crt, quote);
-    if (ret < 0)
-        goto out;
 
     /* prepare user-supplied verification parameters "allow outdated TCB"/"allow debug enclave" */
     bool allow_outdated_tcb  = getenv_allow_outdated_tcb();
@@ -140,6 +131,7 @@ int ra_tls_verify_callback(void* data, mbedtls_x509_crt* crt, int depth, uint32_
     /* call into libsgx_dcap_quoteverify to get supplemental data size */
     ret = sgx_qv_get_quote_supplemental_data_size(&supplemental_data_size);
     if (ret) {
+        ERROR("sgx_qv_get_quote_supplemental_data_size failed: %d\n", ret);
         ret = MBEDTLS_ERR_X509_FATAL_ERROR;
         goto out;
     }
@@ -165,6 +157,7 @@ int ra_tls_verify_callback(void* data, mbedtls_x509_crt* crt, int depth, uint32_
                               /*p_qve_report_info=*/NULL, supplemental_data_size,
                               supplemental_data);
     if (ret) {
+        ERROR("sgx_qv_verify_quote failed: %d\n", ret);
         ret = MBEDTLS_ERR_X509_CERT_VERIFY_FAILED;
         goto out;
     }

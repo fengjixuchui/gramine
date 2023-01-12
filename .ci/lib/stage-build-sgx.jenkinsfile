@@ -6,14 +6,6 @@ stage('build') {
         git checkout 276c5c6a064d22358542f5e0aa96b1c0ace5d695
     '''
 
-    sh '''
-        cd /opt/intel
-        git clone https://github.com/intel/SGXDataCenterAttestationPrimitives.git
-        cd SGXDataCenterAttestationPrimitives
-        git checkout DCAP_1.6
-        # no need to build, we only need the SGX header file (sgx_oot.h)
-    '''
-
     env.MESON_OPTIONS = ''
     if (env.UBSAN == '1') {
         env.MESON_OPTIONS += ' -Dubsan=enabled'
@@ -24,23 +16,12 @@ stage('build') {
     if (env.CC == 'clang') {
         env.MESON_OPTIONS += ' -Dmusl=disabled'
     }
+    if (env.RA_TYPE == 'dcap') {
+        env.MESON_OPTIONS += ' -Ddcap=enabled'
+    }
 
-    try {
-        sh '''
-            meson setup build-dcap/ \
-                --werror \
-                --prefix="$PREFIX" \
-                --buildtype="$BUILDTYPE" \
-                -Ddirect=disabled \
-                -Dsgx=enabled \
-                -Dtests=enabled \
-                -Dsgx_driver=dcap1.6 \
-                $MESON_OPTIONS
-            ninja -vC build-dcap
-        '''
-    } finally {
-        archiveArtifacts 'build-dcap/meson-logs/**/*'
-        sh 'rm -rf build-dcap'
+    if (env.SGX_DRIVER == null) {
+        env.SGX_DRIVER = 'oot'
     }
 
     try {
@@ -52,7 +33,7 @@ stage('build') {
                 -Ddirect=disabled \
                 -Dsgx=enabled \
                 -Dtests=enabled \
-                -Dsgx_driver=oot \
+                -Dsgx_driver="$SGX_DRIVER" \
                 $MESON_OPTIONS
             ninja -vC build/
         '''
@@ -83,7 +64,7 @@ stage('build') {
     env.GRAMINE_PKGLIBDIR = libdir + '/gramine'
 
     // In CI we install to non-standard --prefix (see above). This makes sure the libraries are
-    // available anyway (e.g. gramine-sgx-pf-crypt needs libsgx_util.so).
+    // available anyway.
     env.PKG_CONFIG_PATH = libdir + '/pkgconfig'
 
     // prevent cheating and testing from repo
