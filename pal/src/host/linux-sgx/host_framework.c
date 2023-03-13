@@ -31,6 +31,11 @@ int open_sgx_driver(void) {
     int ret;
     for (size_t i = 0; i < ARRAY_SIZE(paths_to_try); i++) {
         ret = DO_SYSCALL(open, paths_to_try[i], O_RDWR | O_CLOEXEC, 0);
+        if (ret == -EACCES) {
+            log_error("Cannot open %s (permission denied). This may happen because the current "
+                      "user has insufficient permissions to this device.", paths_to_try[i]);
+            return ret;
+        }
         if (ret >= 0) {
             g_isgx_device = ret;
             return 0;
@@ -41,7 +46,7 @@ int open_sgx_driver(void) {
     return ret;
 }
 
-int read_enclave_token(int token_file, sgx_arch_token_t* token) {
+int read_enclave_token(int token_file, sgx_arch_token_t* out_token) {
     struct stat stat;
     int ret;
     ret = DO_SYSCALL(fstat, token_file, &stat);
@@ -49,35 +54,79 @@ int read_enclave_token(int token_file, sgx_arch_token_t* token) {
         return ret;
 
     if (stat.st_size != sizeof(sgx_arch_token_t)) {
-        log_error("size of token size does not match");
+        log_error("Token size does not match.");
         return -EINVAL;
     }
 
-    int bytes = DO_SYSCALL(read, token_file, token, sizeof(sgx_arch_token_t));
-    if (bytes < 0)
+    int bytes = DO_SYSCALL(read, token_file, out_token, sizeof(sgx_arch_token_t));
+    if (bytes < 0) {
         return bytes;
+    } else if (bytes != sizeof(sgx_arch_token_t)) {
+        log_error("Short read while reading token file.");
+        return -EINVAL;
+    }
 
-#ifndef CONFIG_SGX_DRIVER_OOT
-    log_debug("Read dummy DCAP token");
-#else
     char hex[64 * 2 + 1]; /* large enough to hold any of the below fields */
 #define BYTES2HEX(bytes) (bytes2hex(bytes, sizeof(bytes), hex, sizeof(hex)))
     log_debug("Read token:");
-    log_debug("    valid:                 0x%08x",   token->body.valid);
-    log_debug("    attr.flags:            0x%016lx", token->body.attributes.flags);
-    log_debug("    attr.xfrm:             0x%016lx", token->body.attributes.xfrm);
-    log_debug("    mr_enclave:            %s",       BYTES2HEX(token->body.mr_enclave.m));
-    log_debug("    mr_signer:             %s",       BYTES2HEX(token->body.mr_signer.m));
-    log_debug("    LE cpu_svn:            %s",       BYTES2HEX(token->cpu_svn_le.svn));
-    log_debug("    LE isv_prod_id:        %02x",     token->isv_prod_id_le);
-    log_debug("    LE isv_svn:            %02x",     token->isv_svn_le);
-    log_debug("    LE masked_misc_select: 0x%08x",   token->masked_misc_select_le);
-    log_debug("    LE attr.flags:         0x%016lx", token->attributes_le.flags);
-    log_debug("    LE attr.xfrm:          0x%016lx", token->attributes_le.xfrm);
+    log_debug("    valid:                 0x%08x",   out_token->body.valid);
+    log_debug("    attr.flags:            0x%016lx", out_token->body.attributes.flags);
+    log_debug("    attr.xfrm:             0x%016lx", out_token->body.attributes.xfrm);
+    log_debug("    mr_enclave:            %s",       BYTES2HEX(out_token->body.mr_enclave.m));
+    log_debug("    mr_signer:             %s",       BYTES2HEX(out_token->body.mr_signer.m));
+    log_debug("    LE cpu_svn:            %s",       BYTES2HEX(out_token->cpu_svn_le.svn));
+    log_debug("    LE isv_prod_id:        %02x",     out_token->isv_prod_id_le);
+    log_debug("    LE isv_svn:            %02x",     out_token->isv_svn_le);
+    log_debug("    LE masked_misc_select: 0x%08x",   out_token->masked_misc_select_le);
+    log_debug("    LE attr.flags:         0x%016lx", out_token->attributes_le.flags);
+    log_debug("    LE attr.xfrm:          0x%016lx", out_token->attributes_le.xfrm);
 #undef BYTES2HEX
-#endif
 
     return 0;
+}
+
+static int get_optional_sgx_features(uint64_t xfrm, uint64_t xfrm_mask, uint64_t* out_xfrm) {
+    /* see also sgx_get_token.py:get_optional_sgx_features(), used for legacy non-FLC machines */
+    const struct {
+        uint64_t bits;
+        const struct {
+            uint32_t leaf;
+            uint32_t subleaf;
+            uint32_t reg;
+            uint32_t bit;
+        } cpuid;
+    } xfrm_flags[] = {
+        /* for mapping of CPUID leaves to CPU features, see libos/src/arch/x86_64/libos_cpuid.c */
+        {SGX_XFRM_AVX,    { .leaf = FEATURE_FLAGS_LEAF,          .subleaf = 0, .reg = CPUID_WORD_ECX, .bit = 28 }},
+        {SGX_XFRM_MPX,    { .leaf = EXTENDED_FEATURE_FLAGS_LEAF, .subleaf = 0, .reg = CPUID_WORD_EBX, .bit = 14 }},
+        {SGX_XFRM_AVX512, { .leaf = EXTENDED_FEATURE_FLAGS_LEAF, .subleaf = 0, .reg = CPUID_WORD_EBX, .bit = 16 }},
+        {SGX_XFRM_PKRU,   { .leaf = EXTENDED_FEATURE_FLAGS_LEAF, .subleaf = 0, .reg = CPUID_WORD_ECX, .bit = 3 }},
+        {SGX_XFRM_AMX,    { .leaf = EXTENDED_FEATURE_FLAGS_LEAF, .subleaf = 0, .reg = CPUID_WORD_EDX, .bit = 24 }},
+    };
+
+    *out_xfrm = xfrm;
+    for (size_t i = 0; i < ARRAY_SIZE(xfrm_flags); i++) {
+        /* check if SIGSTRUCT.ATTRIBUTEMASK.XFRM doesn't care whether an optional CPU feature is
+         * enabled or not (XFRM mask should completely unset these bits) */
+        if ((xfrm_flags[i].bits & xfrm_mask) == 0) {
+            /* set CPU feature if current system supports it (for performance) */
+            uint32_t values[4];
+            cpuid(xfrm_flags[i].cpuid.leaf, xfrm_flags[i].cpuid.subleaf, values);
+            if (values[xfrm_flags[i].cpuid.reg] & (1u << xfrm_flags[i].cpuid.bit))
+                *out_xfrm |= xfrm_flags[i].bits;
+        }
+    }
+
+    return 0;
+}
+
+int create_dummy_enclave_token(sgx_sigstruct_t* sig, sgx_arch_token_t* out_token) {
+    memset(out_token, 0, sizeof(*out_token));
+    memcpy(&out_token->body.attributes, &sig->attributes, sizeof(sgx_attributes_t));
+    out_token->masked_misc_select_le = sig->misc_select;
+
+    return get_optional_sgx_features(sig->attributes.xfrm, sig->attribute_mask.xfrm,
+                                     &out_token->body.attributes.xfrm);
 }
 
 int read_enclave_sigstruct(int sigfile, sgx_sigstruct_t* sig) {
@@ -101,7 +150,7 @@ int read_enclave_sigstruct(int sigfile, sgx_sigstruct_t* sig) {
 
 bool is_wrfsbase_supported(void) {
     uint32_t cpuinfo[4];
-    cpuid(7, 0, cpuinfo);
+    cpuid(EXTENDED_FEATURE_FLAGS_LEAF, 0, cpuinfo);
 
     if (!(cpuinfo[1] & 0x1)) {
         log_error(
@@ -142,6 +191,14 @@ int create_enclave(sgx_arch_secs_t* secs, sgx_arch_token_t* token) {
     uint64_t addr = DO_SYSCALL(mmap, request_mmap_addr, request_mmap_size,
                                PROT_READ | PROT_WRITE | PROT_EXEC, MAP_FIXED | MAP_SHARED,
                                g_isgx_device, 0);
+    if (IS_PTR_ERR(addr) && PTR_TO_ERR(addr) == -EACCES) {
+        /* OOT DCAP driver (e.g. v1.33.2 found on MS Azure VMs with Ubuntu 18.04) requires
+         * different mmap flags */
+        /* TODO: remove this fallback after we drop Ubuntu 18.04 */
+        addr = DO_SYSCALL(mmap, request_mmap_addr, request_mmap_size,
+                          PROT_NONE, MAP_FIXED | MAP_PRIVATE | MAP_ANONYMOUS, -1, 0);
+    }
+
     if (IS_PTR_ERR(addr)) {
         int ret = PTR_TO_ERR(addr);
         if (ret == -EPERM) {
@@ -385,7 +442,7 @@ int edmm_restrict_pages_perm(uint64_t addr, size_t count, uint64_t prot) {
             if (ret == -EBUSY || ret == -EAGAIN || ret == -EINTR) {
                 continue;
             }
-            log_error("%s: SGX_IOC_ENCLAVE_RESTRICT_PERMISSIONS failed (%llu) %s", __func__,
+            log_error("SGX_IOC_ENCLAVE_RESTRICT_PERMISSIONS failed (%llu) %s",
                       (unsigned long long)params.result, unix_strerror(ret));
             return ret;
         }
@@ -411,7 +468,7 @@ int edmm_modify_pages_type(uint64_t addr, size_t count, uint64_t type) {
             if (ret == -EBUSY || ret == -EAGAIN || ret == -EINTR) {
                 continue;
             }
-            log_error("%s: SGX_IOC_ENCLAVE_MODIFY_TYPES failed: (%llu) %s", __func__,
+            log_error("SGX_IOC_ENCLAVE_MODIFY_TYPES failed: (%llu) %s",
                       (unsigned long long)params.result, unix_strerror(ret));
             return ret;
         }
@@ -440,6 +497,19 @@ int edmm_remove_pages(uint64_t addr, size_t count) {
         }
     }
 
+    return 0;
+}
+
+/* must be called after open_sgx_driver() */
+int edmm_supported_by_driver(bool* out_supported) {
+    struct sgx_enclave_remove_pages params = { .offset = 0, .length = 0 }; /* dummy */
+    int ret = DO_SYSCALL(ioctl, g_isgx_device, SGX_IOC_ENCLAVE_REMOVE_PAGES, &params);
+    if (ret != -EINVAL && ret != -ENOTTY) {
+        /* we expect either -EINVAL (REMOVE_PAGES ioctl exists but fails due to params.length == 0)
+         * or -ENOTTY (REMOVE_PAGES ioctl doesn't exist) */
+        return ret >= 0 ? -EPERM : ret;
+    }
+    *out_supported = ret == -EINVAL;
     return 0;
 }
 

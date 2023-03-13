@@ -1,7 +1,7 @@
 conf = configuration_data()
 conf.set('VERSION', meson.project_version())
-conf.set('PKGLIBDIR', join_paths(get_option('prefix'), pkglibdir))
-conf.set('LIBDIR', join_paths(get_option('prefix'), get_option('libdir')))
+conf.set('PKGLIBDIR', get_option('prefix') / pkglibdir)
+conf.set('LIBDIR', get_option('prefix') / get_option('libdir'))
 conf.set('SYSLIBDIR', syslibdir)
 conf.set('SGX_ENABLED', sgx ? '1' : '0')
 
@@ -26,13 +26,15 @@ if enable_tests
 endif
 
 if sgx
-    aesm_pb2 = custom_target('aesm_pb2.py',
-        input: 'aesm.proto',
-        output: 'aesm_pb2.py',
-        command: [protoc_prog, '@INPUT@', '--python_out=@OUTDIR@', '--proto_path=@CURRENT_SOURCE_DIR@'],
-        install: true,
-        install_dir: python3_pkgdir,
-    )
+    if sgx_driver == 'oot'
+        aesm_pb2 = custom_target('aesm_pb2.py',
+            input: 'aesm.proto',
+            output: 'aesm_pb2.py',
+            command: [protoc_prog, '@INPUT@', '--python_out=@OUTDIR@', '--proto_path=@CURRENT_SOURCE_DIR@'],
+            install: true,
+            install_dir: python3_pkgdir,
+        )
+    endif
 
     python_src += [
         'sgx_get_token.py',

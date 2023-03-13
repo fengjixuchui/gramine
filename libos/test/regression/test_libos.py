@@ -6,7 +6,11 @@ import socket
 import subprocess
 import unittest
 
+import json
+import tomli
+
 from graminelibos.regression import (
+    HAS_AVX,
     HAS_EDMM,
     HAS_SGX,
     ON_X86,
@@ -205,21 +209,29 @@ class TC_01_Bootstrap(RegressionTestCase):
         self.assertIn('child exited with status: 0', stdout)
         self.assertIn('test completed successfully', stdout)
 
-    def test_203_vfork_and_exec(self):
+    def test_203_fork_disallowed(self):
+        try:
+            self.run_binary(['fork_disallowed'])
+            self.fail('expected to return nonzero')
+        except subprocess.CalledProcessError as e:
+            stderr = e.stderr.decode()
+            self.assertIn('The app tried to create a subprocess, but this is disabled', stderr)
+
+    def test_204_vfork_and_exec(self):
         stdout, _ = self.run_binary(['vfork_and_exec'], timeout=60)
 
         # vfork and exec 2 page child binary
         self.assertIn('child exited with status: 0', stdout)
         self.assertIn('test completed successfully', stdout)
 
-    def test_204_exec_fork(self):
+    def test_205_exec_fork(self):
         stdout, _ = self.run_binary(['exec_fork'], timeout=60)
         self.assertNotIn('Handled SIGCHLD', stdout)
         self.assertIn('Set up handler for SIGCHLD', stdout)
         self.assertIn('child exited with status: 0', stdout)
         self.assertIn('test completed successfully', stdout)
 
-    def test_205_double_fork(self):
+    def test_206_double_fork(self):
         stdout, stderr = self.run_binary(['double_fork'])
         self.assertIn('TEST OK', stdout)
         self.assertNotIn('grandchild', stderr)
@@ -419,6 +431,20 @@ class TC_01_Bootstrap(RegressionTestCase):
             self.assertIn('argv handling wasn\'t configured in the manifest, but cmdline arguments '
                           'were specified', stderr)
 
+    @unittest.skipUnless(HAS_SGX, 'MRENCLAVE check is possible only with SGX')
+    def test_703_debug_log_cmp_mrenclaves(self):
+        result = subprocess.run(['gramine-sgx-sigstruct-view', '--output-format=toml',
+                                 'debug_log_inline.sig'], stdout=subprocess.PIPE, check=True)
+        toml_dict = tomli.loads(result.stdout.decode())
+
+        result = subprocess.run(['gramine-sgx-sigstruct-view', '--output-format=json',
+                                 'debug_log_inline.sig'], stdout=subprocess.PIPE, check=True)
+        json_dict = json.loads(result.stdout.decode())
+
+        self.assertEqual(toml_dict, json_dict)
+
+        _, stderr = self.run_binary(['debug_log_inline'])
+        self.assertIn(f'debug:     mr_enclave:   {toml_dict["mr_enclave"]}', stderr)
 
 class TC_02_OpenMP(RegressionTestCase):
     @unittest.skipIf(USES_MUSL, 'OpenMP is not supported with musl')
@@ -1159,7 +1185,7 @@ class TC_40_FileSystem(RegressionTestCase):
 class TC_50_GDB(RegressionTestCase):
     def setUp(self):
         if not self.has_debug():
-            self.skipTest('test runs only when Gramine is compiled with DEBUG=1')
+            self.skipTest('test runs only when Gramine is compiled in debug mode')
 
     def find(self, name, stdout):
         match = re.search('<{0} start>(.*)<{0} end>'.format(name), stdout, re.DOTALL)
@@ -1310,6 +1336,10 @@ class TC_80_Socket(RegressionTestCase):
         stdout, _ = self.run_binary(['tcp_msg_peek'])
         self.assertIn('TEST OK', stdout)
 
+    def test_301_socket_tcp_ancillary(self):
+        stdout, _ = self.run_binary(['tcp_ancillary'])
+        self.assertIn('TEST OK', stdout)
+
     def test_310_socket_tcp_ipv6_v6only(self):
         stdout, _ = self.run_binary(['tcp_ipv6_v6only'], timeout=50)
         self.assertIn('test completed successfully', stdout)
@@ -1320,6 +1350,9 @@ class TC_90_CpuidSGX(RegressionTestCase):
     def test_000_cpuid(self):
         stdout, _ = self.run_binary(['cpuid'])
         self.assertIn('CPUID test passed.', stdout)
+        self.assertIn('AESNI support: true', stdout)
+        self.assertIn('XSAVE support: true', stdout)
+        self.assertIn('RDRAND support: true', stdout)
 
 # note that `rdtsc` also correctly runs on non-SGX PAL, but non-SGX CPU may not have rdtscp
 @unittest.skipUnless(HAS_SGX,
@@ -1327,4 +1360,11 @@ class TC_90_CpuidSGX(RegressionTestCase):
 class TC_91_RdtscSGX(RegressionTestCase):
     def test_000_rdtsc(self):
         stdout, _ = self.run_binary(['rdtsc'])
+        self.assertIn('TEST OK', stdout)
+
+@unittest.skipUnless(HAS_AVX,
+    'This test checks if SIGSTRUCT.ATTRIBUTES.XFRM enables optional CPU features in SGX.')
+class TC_92_avx(RegressionTestCase):
+    def test_000_avx(self):
+        stdout, _ = self.run_binary(['avx'])
         self.assertIn('TEST OK', stdout)

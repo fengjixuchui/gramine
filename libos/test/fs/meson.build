@@ -14,6 +14,7 @@ common_lib_copy_mmap = static_library('test_fs_copy_mmap',
 )
 
 tests = {
+    'chmod_stat': {},
     'copy_mmap_rev': {
         'link_with': common_lib_copy_mmap,
     },
@@ -48,7 +49,7 @@ tests = {
     'truncate': {},
 }
 
-install_dir = join_paths(pkglibdir, 'tests', 'libos', 'fs')
+install_dir = pkglibdir / 'tests' / 'libos' / 'fs'
 
 foreach name, params : tests
     exe = executable(name,

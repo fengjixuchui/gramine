@@ -337,6 +337,27 @@ Be careful! In SGX environment, the untrusted host could inject that signal in
 an arbitrary moment. Examine what your application's `SIGTERM` handler does and
 whether it poses any security threat.
 
+Disallowing subprocesses (fork)
+^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+::
+
+    sys.disallow_subprocesses = [true|false]
+    (Default: false)
+
+This specifies whether to block applications from creating child processes (e.g.
+via ``fork()`` or ``clone()`` system calls). The intuition is that many
+applications have fallbacks when they fail to spawn a child process (e.g.
+Python). Could be useful in SGX environments: child processes consume
+:term:`EPC` memory which is a limited resource.
+
+.. note ::
+   This option is *not* a security feature - Gramine by-design is only a one-way
+   sandbox, which doesn't protect the host from the enclave. Don't use this
+   option if you want to somehow mitigate running untrusted enclaves. Instead,
+   to achieve this, you need to run the whole Gramine inside a proper security
+   sandbox.
+
 Root FS mount point
 ^^^^^^^^^^^^^^^^^^^
 
@@ -459,6 +480,9 @@ as RWX). Unfortunately it can negatively impact performance, as adding a page
 to the enclave at runtime is a more expensive operation than adding the page
 before enclave creation (because it involves more enclave exits and syscalls).
 
+.. note::
+   Support for EDMM first appeared in Linux 6.0.
+
 Enclave size
 ^^^^^^^^^^^^
 
@@ -504,17 +528,6 @@ consume 8GB of RAM in total. If there is less than 8GB of RAM (+ swap file) on
 your system, such ``bash -c ls`` SGX workload will fail. Note this does not
 apply to the enclaves with :term:`EDMM` enabled, where memory is not reserved
 upfront and is allocated on demand.
-
-Non-PIE binaries
-^^^^^^^^^^^^^^^^
-
-::
-
-    sgx.nonpie_binary = [true|false]
-    (Default: false)
-
-This setting tells Gramine whether to use a specially crafted memory layout,
-which is required to support non-relocatable binaries (non-PIE).
 
 Number of threads
 ^^^^^^^^^^^^^^^^^
@@ -850,8 +863,9 @@ SGX profiling
     (Default: "none")
 
 This syntax specifies whether to enable SGX profiling. Gramine must be compiled
-with ``DEBUG=1`` or ``DEBUGOPT=1`` for this option to work (the latter is
-advised).
+with ``--buildtype=debug`` or ``--buildtype=debugoptimized`` for this option to
+work (the latter is advised). In addition, the manifest must contain
+``sgx.debug = true``.
 
 If this option is set to ``main``, the main process will collect IP samples and
 save them as ``sgx-perf.data``. If it is set to ``all``, all processes will
@@ -920,9 +934,9 @@ SGX profiling with Intel VTune Profiler
     (Default: false)
 
 This syntax specifies whether to enable SGX profiling with Intel VTune Profiler.
-Gramine must be compiled with ``DEBUG=1`` or ``DEBUGOPT=1`` for this option to
-work (the latter is advised). In addition, the application manifest must also
-contain ``sgx.debug = true``.
+Gramine must be compiled with ``--buildtype=debug`` or
+``--buildtype=debugoptimized`` for this option to work (the latter is advised).
+In addition, the application manifest must also contain ``sgx.debug = true``.
 
 .. note::
    The manifest options ``sgx.vtune_profile`` and ``sgx.profile.*`` can work

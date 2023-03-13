@@ -19,13 +19,13 @@ RA_CLIENT_LINKABLE ?= 0
 all: app epid  # by default, only build EPID because it doesn't rely on additional (DCAP) libs
 
 .PHONY: app
-app: ssl/server.crt server.manifest.sgx server.sig server.token client
+app: ssl/server.crt server.manifest.sgx server.sig client
 
 .PHONY: epid
-epid: client_epid.manifest.sgx client_epid.sig client_epid.token
+epid: client_epid.manifest.sgx client_epid.sig
 
 .PHONY: dcap
-dcap: client_dcap.manifest.sgx client_dcap.sig client_dcap.token
+dcap: client_dcap.manifest.sgx client_dcap.sig
 
 ############################# SSL DATA DEPENDENCY #############################
 
@@ -39,7 +39,10 @@ ssl/server.crt: ssl/ca_config.conf
 
 ######################### CLIENT/SERVER EXECUTABLES ###########################
 
-CFLAGS += $(shell pkg-config --cflags mbedtls_gramine)
+CFLAGS += $(shell pkg-config --cflags mbedtls_gramine) \
+          $(shell pkg-config --cflags ra_tls_gramine)
+
+# no need for `pkg-config --libs ra_tls_gramine` because programs use dlopen
 LDFLAGS += -ldl -Wl,--enable-new-dtags $(shell pkg-config --libs mbedtls_gramine)
 
 server: src/server.c
@@ -70,9 +73,6 @@ sgx_sign_server: server.manifest server
 		--manifest $< \
 		--output $<.sgx
 
-server.token: server.sig
-	gramine-sgx-get-token --output $@ --sig $<
-
 ########################### CLIENT (DCAP) MANIFEST ############################
 
 client_dcap.manifest: client.manifest.template
@@ -90,9 +90,6 @@ sgx_sign_client_dcap: client_dcap.manifest client
 		--manifest $< \
 		--output $<.sgx
 
-client_dcap.token: client_dcap.sig
-	gramine-sgx-get-token --output $@ --sig $<
-
 ########################### CLIENT (EPID) MANIFEST ############################
 
 client_epid.manifest: client.manifest.template
@@ -109,9 +106,6 @@ sgx_sign_client_epid: client_epid.manifest client
 	gramine-sgx-sign \
 		--manifest $< \
 		--output $<.sgx
-
-client_epid.token: client_epid.sig
-	gramine-sgx-get-token --output $@ --sig $<
 
 ############################### SGX CHECKS FOR CI #############################
 

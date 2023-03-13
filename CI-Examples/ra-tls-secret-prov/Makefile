@@ -24,9 +24,9 @@ all: app epid  # by default, only build EPID because it doesn't rely on addition
 .PHONY: app
 app: \
      ssl/server.crt \
-     secret_prov_minimal/client.manifest.sgx secret_prov_minimal/client.sig secret_prov_minimal/client.token \
-     secret_prov/client.manifest.sgx     secret_prov/client.sig     secret_prov/client.token \
-     secret_prov_pf/client.manifest.sgx  secret_prov_pf/client.sig  secret_prov_pf/client.token
+     secret_prov_minimal/client.manifest.sgx secret_prov_minimal/client.sig \
+     secret_prov/client.manifest.sgx     secret_prov/client.sig \
+     secret_prov_pf/client.manifest.sgx  secret_prov_pf/client.sig
 
 .PHONY: epid
 epid: ssl/server.crt secret_prov_minimal/server_epid secret_prov/server_epid secret_prov_pf/server_epid \
@@ -48,13 +48,8 @@ ssl/server.crt: ssl/ca_config.conf
 
 ######################### CLIENT/SERVER EXECUTABLES ###########################
 
-# Use hard-coded GRAMINEDIR because we currently fail to provide secret prov headers in Gramine
-# installation. We also use `mbedtls_gramine` pkg-config because we don't have a secret prov one.
-# TODO: Create a pkg-config file for secretprov_gramine libs, and use it in below
-#       CFLAGS/LDFLAGS lines (via `pkg-config {--cflags|--libs} secretprov_gramine`).
-GRAMINEDIR ?= ../..
-CFLAGS += -Wall -std=c11 -I$(GRAMINEDIR)/tools/sgx/ra-tls
-LDFLAGS += -Wl,--enable-new-dtags $(shell pkg-config --libs mbedtls_gramine)
+CFLAGS += -Wall -std=c11 $(shell pkg-config --cflags secret_prov_gramine)
+LDFLAGS += -Wl,--enable-new-dtags $(shell pkg-config --libs secret_prov_gramine)
 
 %/server_epid: %/server.c
 	$(CC) $< $(CFLAGS) $(LDFLAGS) -lsecret_prov_verify_epid -pthread -o $@
@@ -100,9 +95,6 @@ sgx_sign_secret_prov_minimal_client: secret_prov_minimal/client.manifest secret_
 		--manifest $(notdir $<) \
 		--output $(notdir $<.sgx)
 
-secret_prov_minimal/client.token: secret_prov_minimal/client.sig
-	gramine-sgx-get-token --output $@ --sig $<
-
 ############################### CLIENT MANIFEST ###############################
 
 secret_prov/client.manifest: secret_prov/client.manifest.template
@@ -125,9 +117,6 @@ sgx_sign_secret_prov_client: secret_prov/client.manifest secret_prov/client
 		--manifest $(notdir $<) \
 		--output $(notdir $<.sgx)
 
-secret_prov/client.token: secret_prov/client.sig
-	gramine-sgx-get-token --output $@ --sig $<
-
 ############################## PF CLIENT MANIFEST #############################
 
 secret_prov_pf/client.manifest: secret_prov_pf/client.manifest.template
@@ -149,9 +138,6 @@ sgx_sign_secret_prov_pf_client: secret_prov_pf/client.manifest secret_prov_pf/cl
 	gramine-sgx-sign \
 		--manifest $(notdir $<) \
 		--output $(notdir $<.sgx)
-
-secret_prov_pf/client.token: secret_prov_pf/client.sig
-	gramine-sgx-get-token --output $@ --sig $<
 
 ########################## PREPARE PROTECTED FILES ############################
 

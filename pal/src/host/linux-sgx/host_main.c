@@ -11,6 +11,7 @@
 #include <linux/fs.h>
 
 #include "asan.h"
+#include "cpu.h"
 #include "debug_map.h"
 #include "etc_host_info.h"
 #include "gdb_integration/sgx_gdb.h"
@@ -18,6 +19,7 @@
 #include "host_internal.h"
 #include "host_log.h"
 #include "host_process.h"
+#include "host_sgx_driver.h"
 #include "linux_utils.h"
 #include "pal_linux_defs.h"
 #include "pal_linux_error.h"
@@ -197,57 +199,12 @@ out:
     return ret;
 }
 
-static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_to_measure) {
-    int ret = 0;
-    int enclave_image = -1;
-    sgx_arch_token_t enclave_token;
-    sgx_sigstruct_t enclave_sigstruct;
-    sgx_arch_secs_t enclave_secs;
-    unsigned long enclave_entry_addr;
-    unsigned long enclave_heap_min;
-    char* sig_path = NULL;
+#if defined(CONFIG_SGX_DRIVER_OOT)
+static int get_enclave_token(sgx_arch_token_t* enclave_token, sgx_sigstruct_t* enclave_sigstruct) {
+    __UNUSED(enclave_sigstruct);
     char* token_path = NULL;
-    int sigfile_fd = -1, token_fd = -1;
-    int enclave_mem = -1;
-    size_t areas_size = 0;
-    struct mem_area* areas = NULL;
-
-    /* this array may overflow the stack, so we allocate it in BSS */
-    static void* tcs_addrs[MAX_DBG_THREADS];
-
-    enclave_image = DO_SYSCALL(open, enclave->libpal_uri + URI_PREFIX_FILE_LEN,
-                               O_RDONLY | O_CLOEXEC, 0);
-    if (enclave_image < 0) {
-        log_error("Cannot find enclave image: %s", enclave->libpal_uri);
-        ret = enclave_image;
-        goto out;
-    }
-
-    if (enclave->nonpie_binary) {
-        /* executable is non-PIE: enclave base address must cover code segment loaded at some
-         * hardcoded address (usually 0x400000), and heap cannot start at zero (modern OSes do not
-         * allow this) */
-        enclave->baseaddr = DEFAULT_ENCLAVE_BASE;
-        enclave_heap_min  = MMAP_MIN_ADDR;
-    } else {
-        /* executable is PIE: enclave base address can be arbitrary (we choose it same as
-         * enclave_size), and heap can start immediately at this base address */
-        enclave->baseaddr = enclave->size;
-        enclave_heap_min  = enclave->baseaddr;
-    }
-
-    sig_path = alloc_concat(g_pal_enclave.application_path, -1, ".sig", -1);
-    if (!sig_path) {
-        ret = -ENOMEM;
-        goto out;
-    }
-
-    sigfile_fd = DO_SYSCALL(open, sig_path, O_RDONLY | O_CLOEXEC, 0);
-    if (sigfile_fd < 0) {
-        log_error("Cannot open sigstruct file %s", sig_path);
-        ret = -EINVAL;
-        goto out;
-    }
+    int token_fd = -1;
+    int ret;
 
     token_path = alloc_concat(g_pal_enclave.application_path, -1, ".token", -1);
     if (!token_path) {
@@ -264,7 +221,78 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
     }
     log_debug("Token file: %s", token_path);
 
-    ret = read_enclave_token(token_fd, &enclave_token);
+    ret = read_enclave_token(token_fd, enclave_token);
+    if (ret < 0) {
+        log_error("Reading enclave token failed: %s", unix_strerror(ret));
+        goto out;
+    }
+
+    ret = 0;
+out:
+    if (token_fd >= 0)
+        DO_SYSCALL(close, token_fd);
+    free(token_path);
+    return ret;
+}
+#elif defined(CONFIG_SGX_DRIVER_UPSTREAM)
+static int get_enclave_token(sgx_arch_token_t* enclave_token, sgx_sigstruct_t* enclave_sigstruct) {
+    return create_dummy_enclave_token(enclave_sigstruct, enclave_token);
+}
+#else
+    #error This config should be unreachable.
+#endif
+
+static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_to_measure) {
+    int ret = 0;
+    int enclave_image = -1;
+    sgx_arch_token_t enclave_token;
+    sgx_sigstruct_t enclave_sigstruct;
+    sgx_arch_secs_t enclave_secs;
+    unsigned long enclave_entry_addr;
+    unsigned long enclave_heap_min;
+    char* sig_path = NULL;
+    int sigfile_fd = -1;
+    int enclave_mem = -1;
+    size_t areas_size = 0;
+    struct mem_area* areas = NULL;
+
+    /* this array may overflow the stack, so we allocate it in BSS */
+    static void* tcs_addrs[MAX_DBG_THREADS];
+
+    enclave_image = DO_SYSCALL(open, enclave->libpal_uri + URI_PREFIX_FILE_LEN,
+                               O_RDONLY | O_CLOEXEC, 0);
+    if (enclave_image < 0) {
+        log_error("Cannot find enclave image: %s", enclave->libpal_uri);
+        ret = enclave_image;
+        goto out;
+    }
+
+    /* set up enclave address space so that it works also for non-PIE binaries: enclave base address
+     * must cover code segment loaded at some hardcoded address (usually 0x400000), and heap cannot
+     * start at zero (modern OSes do not allow this) */
+    enclave->baseaddr = DEFAULT_ENCLAVE_BASE;
+    enclave_heap_min  = MMAP_MIN_ADDR;
+
+    sig_path = alloc_concat(g_pal_enclave.application_path, -1, ".sig", -1);
+    if (!sig_path) {
+        ret = -ENOMEM;
+        goto out;
+    }
+
+    sigfile_fd = DO_SYSCALL(open, sig_path, O_RDONLY | O_CLOEXEC, 0);
+    if (sigfile_fd < 0) {
+        log_error("Cannot open sigstruct file %s", sig_path);
+        ret = -EINVAL;
+        goto out;
+    }
+
+    ret = read_enclave_sigstruct(sigfile_fd, &enclave_sigstruct);
+    if (ret < 0) {
+        log_error("Reading enclave sigstruct failed: %s", unix_strerror(ret));
+        goto out;
+    }
+
+    ret = get_enclave_token(&enclave_token, &enclave_sigstruct);
     if (ret < 0) {
         log_error("Reading enclave token failed: %s", unix_strerror(ret));
         goto out;
@@ -290,12 +318,6 @@ static int initialize_enclave(struct pal_enclave* enclave, const char* manifest_
         }
     }
 #endif
-
-    ret = read_enclave_sigstruct(sigfile_fd, &enclave_sigstruct);
-    if (ret < 0) {
-        log_error("Reading enclave sigstruct failed: %s", unix_strerror(ret));
-        goto out;
-    }
 
     memset(&enclave_secs, 0, sizeof(enclave_secs));
     enclave_secs.base = enclave->baseaddr;
@@ -625,12 +647,9 @@ out:
         DO_SYSCALL(close, enclave_mem);
     if (sigfile_fd >= 0)
         DO_SYSCALL(close, sigfile_fd);
-    if (token_fd >= 0)
-        DO_SYSCALL(close, token_fd);
     if (areas)
         DO_SYSCALL(munmap, areas, areas_size);
     free(sig_path);
-    free(token_path);
     return ret;
 }
 
@@ -742,15 +761,6 @@ static int parse_loader_config(char* manifest, struct pal_enclave* enclave_info,
         ret = -EINVAL;
         goto out;
     }
-
-    bool nonpie_binary;
-    ret = toml_bool_in(manifest_root, "sgx.nonpie_binary", /*defaultval=*/false, &nonpie_binary);
-    if (ret < 0) {
-        log_error("Cannot parse 'sgx.nonpie_binary' (the value must be `true` or `false`)");
-        ret = -EINVAL;
-        goto out;
-    }
-    enclave_info->nonpie_binary = nonpie_binary;
 
     ret = toml_bool_in(manifest_root, "sgx.enable_stats", /*defaultval=*/false,
                        &g_sgx_enable_stats);
@@ -872,7 +882,7 @@ static int parse_loader_config(char* manifest, struct pal_enclave* enclave_info,
 #else
     if (profile_str && strcmp(profile_str, "none")) {
         log_error("Invalid 'sgx.profile.enable' "
-                  "(SGX profiling works only when Gramine is compiled with DEBUG=1)");
+                  "(SGX profiling works only when Gramine is compiled in debug mode)");
         ret = -EINVAL;
         goto out;
     }
@@ -1006,6 +1016,26 @@ static int load_enclave(struct pal_enclave* enclave, char* args, size_t args_siz
         return -EINVAL;
     }
 
+    if (enclave->edmm_enabled) {
+        uint32_t values[4];
+        cpuid(INTEL_SGX_LEAF, 0, values);
+        if (!(values[CPUID_WORD_EAX] & (1u << 1))) {
+            log_error("EDMM feature was requested in manifest, but CPU doesn't support it");
+            return -EPERM;
+        }
+
+        bool edmm_supported;
+        ret = edmm_supported_by_driver(&edmm_supported);
+        if (ret < 0) {
+            log_error("Failed to check support for EDMM feature: %s", unix_strerror(ret));
+            return ret;
+        }
+        if (!edmm_supported) {
+            log_error("EDMM feature was requested in manifest, but SGX driver doesn't support it");
+            return -EPERM;
+        }
+    }
+
     ret = initialize_enclave(enclave, enclave->raw_manifest_data);
     if (ret < 0)
         return ret;
@@ -1112,6 +1142,31 @@ static void setup_asan(void) {
 }
 #endif
 
+static int verify_hw_requirements(char* envp[]) {
+    uint64_t at_hwcap2;
+    if (get_aux_value(envp, AT_HWCAP2, &at_hwcap2) != 0 || !(at_hwcap2 & 0x2)) {
+        log_error("Gramine with Linux-SGX backend requires support for FSGSBASE CPU instructions "
+                  "in the host kernel. Please update your system.");
+        return -EINVAL;
+    }
+
+    unsigned int values[4];
+    cpuid(FEATURE_FLAGS_LEAF, /*unused*/0, values);
+    const char* missing = NULL;
+    if (!(values[CPUID_WORD_ECX] & (1 << 25)))
+        missing = "AES-NI";
+    else if (!(values[CPUID_WORD_ECX] & (1 << 26)))
+        missing = "XSAVE";
+    else if (!(values[CPUID_WORD_ECX] & (1 << 30)))
+        missing = "RDRAND";
+    if (missing) {
+        log_error("Gramine with Linux-SGX backend requires %s CPU instruction(s). "
+                  "Please upgrade your hardware.", missing);
+        return -EINVAL;
+    }
+    return 0;
+}
+
 __attribute_no_sanitize_address
 int main(int argc, char* argv[], char* envp[]) {
     char* manifest_path = NULL;
@@ -1135,7 +1190,6 @@ int main(int argc, char* argv[], char* envp[]) {
     static_assert(THREAD_STACK_SIZE % PAGE_SIZE == 0, "");
     probe_stack(THREAD_STACK_SIZE / PAGE_SIZE);
 
-
     if (argc < 4)
         print_usage_and_exit(argv[0]);
 
@@ -1146,12 +1200,9 @@ int main(int argc, char* argv[], char* envp[]) {
         return -ENOMEM;
     }
 
-    uint64_t at_hwcap2;
-    if (get_aux_value(envp, AT_HWCAP2, &at_hwcap2) != 0 || !(at_hwcap2 & 0x2)) {
-        log_error("Gramine with Linux-SGX backend requires support for FSGSBASE CPU instructions "
-                  "in the host kernel. Please update your system.");
-        return -EINVAL;
-    }
+    ret = verify_hw_requirements(envp);
+    if (ret < 0)
+        return ret;
 
     g_libpal_path = strdup(argv[1]);
     if (!g_libpal_path) {
@@ -1227,6 +1278,7 @@ int main(int argc, char* argv[], char* envp[]) {
                        reserved_mem_ranges, reserved_mem_ranges_size);
     if (ret < 0) {
         log_error("load_enclave() failed with error: %s", unix_strerror(ret));
+        return ret;
     }
     return 0;
 }

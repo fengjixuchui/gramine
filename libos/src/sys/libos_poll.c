@@ -44,18 +44,38 @@ typedef unsigned long __fd_mask;
 #define POLLIN_SET (POLLRDNORM | POLLRDBAND | POLLIN | POLLHUP | POLLERR)
 #define POLLOUT_SET (POLLWRBAND | POLLWRNORM | POLLOUT | POLLERR)
 #define POLLEX_SET (POLLPRI)
+/* To avoid expensive malloc/free (due to locking), use stack if the required space is small
+ * enough. */
+#define NFDS_LIMIT_TO_USE_STACK 16
 
 static long do_poll(struct pollfd* fds, size_t fds_len, uint64_t* timeout_us) {
-    struct libos_handle** libos_handles = calloc(fds_len, sizeof(*libos_handles));
-    PAL_HANDLE* pal_handles = calloc(fds_len, sizeof(*pal_handles));
+    struct libos_handle** libos_handles = NULL;
+    PAL_HANDLE* pal_handles = NULL;
     /* Double the amount of PAL events - one part are input events, the other - output. */
-    pal_wait_flags_t* pal_events = calloc(2 * fds_len, sizeof(*pal_events));
-    if (!libos_handles || !pal_handles || !pal_events) {
-        free(libos_handles);
-        free(pal_handles);
-        free(pal_events);
-        return -ENOMEM;
+    pal_wait_flags_t* pal_events = NULL;
+    bool allocate_on_stack = fds_len <= NFDS_LIMIT_TO_USE_STACK;
+
+    if (allocate_on_stack) {
+        static_assert((sizeof(*libos_handles) + sizeof(*pal_handles) + sizeof(*pal_events) * 2) *
+                      NFDS_LIMIT_TO_USE_STACK <= 384,
+                      "Would use too much space on stack, reduce the limit");
+        libos_handles = __builtin_alloca(fds_len * sizeof(*libos_handles));
+        pal_handles = __builtin_alloca(fds_len * sizeof(*pal_handles));
+        pal_events = __builtin_alloca(fds_len * sizeof(*pal_events) * 2);
+    } else {
+        libos_handles = malloc(fds_len * sizeof(*libos_handles));
+        pal_handles = malloc(fds_len * sizeof(*pal_handles));
+        pal_events = malloc(fds_len * sizeof(*pal_events) * 2);
+        if (!libos_handles || !pal_handles || !pal_events) {
+            free(libos_handles);
+            free(pal_handles);
+            free(pal_events);
+            return -ENOMEM;
+        }
     }
+    memset(libos_handles, 0, fds_len * sizeof(*libos_handles));
+    memset(pal_handles, 0, fds_len * sizeof(*pal_handles));
+    memset(pal_events, 0, fds_len * sizeof(*pal_events) * 2);
 
     long ret;
     size_t ret_events_count = 0;
@@ -189,9 +209,11 @@ out:
             put_handle(libos_handles[i]);
         }
     }
-    free(libos_handles);
-    free(pal_handles);
-    free(pal_events);
+    if (!allocate_on_stack) {
+        free(libos_handles);
+        free(pal_handles);
+        free(pal_events);
+    }
 
     if (ret == -EINTR) {
         /* `poll`, `ppoll`, `select` and `pselect` are not restarted after being interrupted by
@@ -249,9 +271,6 @@ long libos_syscall_ppoll(struct pollfd* fds, unsigned int nfds, struct timespec*
 
 static long do_select(int nfds, fd_set* read_set, fd_set* write_set, fd_set* except_set,
                       uint64_t* timeout_us) {
-    if (nfds < 0 || (uint64_t)nfds > get_rlimit_cur(RLIMIT_NOFILE) || nfds > INT_MAX)
-        return -EINVAL;
-
     size_t total_fds = 0;
     for (size_t i = 0; i < (size_t)nfds; i++) {
         if ((read_set && __FD_ISSET(i, read_set)) || (write_set && __FD_ISSET(i, write_set))
@@ -260,9 +279,18 @@ static long do_select(int nfds, fd_set* read_set, fd_set* write_set, fd_set* exc
         }
     }
 
-    struct pollfd* poll_fds = malloc(total_fds * sizeof(*poll_fds));
-    if (!poll_fds)
-        return -ENOMEM;
+    struct pollfd* poll_fds = NULL;
+    bool allocate_on_stack = total_fds <= NFDS_LIMIT_TO_USE_STACK;
+
+    if (allocate_on_stack) {
+        static_assert(sizeof(*poll_fds) * NFDS_LIMIT_TO_USE_STACK <= 128,
+                      "Would use too much space on stack, reduce the limit");
+        poll_fds = __builtin_alloca(total_fds * sizeof(*poll_fds));
+    } else {
+        poll_fds = malloc(total_fds * sizeof(*poll_fds));
+        if (!poll_fds)
+            return -ENOMEM;
+    }
 
     long ret;
     size_t poll_fds_idx = 0;
@@ -325,12 +353,34 @@ static long do_select(int nfds, fd_set* read_set, fd_set* write_set, fd_set* exc
     }
 
 out:
-    free(poll_fds);
+    if (!allocate_on_stack) {
+        free(poll_fds);
+    }
     return ret;
 }
 
 long libos_syscall_select(int nfds, fd_set* read_set, fd_set* write_set, fd_set* except_set,
                           struct __kernel_timeval* tv) {
+    if (nfds < 0 || (uint64_t)nfds > get_rlimit_cur(RLIMIT_NOFILE) || nfds > INT_MAX)
+        return -EINVAL;
+
+    /* Each of `read_set`, `write_set` and `except_set` is an array of fd_set items; each fd_set
+     * item has a single inline array `fd_set::fds_bits` of constant size (typically 128B, which
+     * allows to accommodate 1024 bits, i.e. 1024 file descriptors). Therefore we calculate how many
+     * fd_set items are required to accommodate `nfds` number of file descriptors, i.e., we
+     * calculate the length of each of `read_set`, `write_set` and `except_set` arrays. */
+    static_assert(sizeof(((fd_set*)0)->fds_bits) == sizeof(fd_set), "unexpected fd_set struct");
+    size_t fd_set_arr_len = UDIV_ROUND_UP(nfds, BITS_IN_TYPE(((fd_set*)0)->fds_bits));
+    if (read_set && !is_user_memory_writable(read_set, fd_set_arr_len * sizeof(*read_set))) {
+            return -EFAULT;
+    }
+    if (write_set && !is_user_memory_writable(write_set, fd_set_arr_len * sizeof(*write_set))) {
+            return -EFAULT;
+    }
+    if (except_set && !is_user_memory_writable(except_set, fd_set_arr_len * sizeof(*except_set))) {
+            return -EFAULT;
+    }
+
     uint64_t timeout_us = 0;
     if (tv) {
         if (!is_user_memory_readable(tv, sizeof(*tv))) {
@@ -359,6 +409,22 @@ struct sigset_argpack {
 
 long libos_syscall_pselect6(int nfds, fd_set* read_set, fd_set* write_set, fd_set* except_set,
                             struct __kernel_timespec* tsp, void* _sigmask_argpack) {
+    if (nfds < 0 || (uint64_t)nfds > get_rlimit_cur(RLIMIT_NOFILE) || nfds > INT_MAX)
+        return -EINVAL;
+
+    /* for explanation on calculations below, see libos_syscall_select() */
+    static_assert(sizeof(((fd_set*)0)->fds_bits) == sizeof(fd_set), "unexpected fd_set struct");
+    size_t fd_set_arr_len = UDIV_ROUND_UP(nfds, BITS_IN_TYPE(((fd_set*)0)->fds_bits));
+    if (read_set && !is_user_memory_writable(read_set, fd_set_arr_len * sizeof(*read_set))) {
+            return -EFAULT;
+    }
+    if (write_set && !is_user_memory_writable(write_set, fd_set_arr_len * sizeof(*write_set))) {
+            return -EFAULT;
+    }
+    if (except_set && !is_user_memory_writable(except_set, fd_set_arr_len * sizeof(*except_set))) {
+            return -EFAULT;
+    }
+
     struct sigset_argpack* sigmask_argpack = _sigmask_argpack;
     if (sigmask_argpack) {
         if (!is_user_memory_readable(sigmask_argpack, sizeof(*sigmask_argpack))) {

@@ -46,7 +46,6 @@ struct pal_enclave {
     unsigned long thread_num;
     unsigned long rpc_thread_num;
     unsigned long ssa_frame_size;
-    bool nonpie_binary;
     bool edmm_enabled;
     enum sgx_attestation_type attestation_type;
     char* libpal_uri; /* Path to the PAL binary */
@@ -66,7 +65,8 @@ extern struct pal_enclave g_pal_enclave;
 int open_sgx_driver(void);
 bool is_wrfsbase_supported(void);
 
-int read_enclave_token(int token_file, sgx_arch_token_t* token);
+int read_enclave_token(int token_file, sgx_arch_token_t* out_token);
+int create_dummy_enclave_token(sgx_sigstruct_t* sig, sgx_arch_token_t* out_token);
 int read_enclave_sigstruct(int sigfile, sgx_sigstruct_t* sig);
 
 int create_enclave(sgx_arch_secs_t* secs, sgx_arch_token_t* token);
@@ -77,6 +77,7 @@ int add_pages_to_enclave(sgx_arch_secs_t* secs, void* addr, void* user_addr, uns
 int edmm_restrict_pages_perm(uint64_t addr, size_t count, uint64_t prot);
 int edmm_modify_pages_type(uint64_t addr, size_t count, uint64_t type);
 int edmm_remove_pages(uint64_t addr, size_t count);
+int edmm_supported_by_driver(bool* out_supported);
 
 /*!
  * \brief Retrieve Quoting Enclave's sgx_target_info_t by talking to AESMD.

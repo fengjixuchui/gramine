@@ -1,5 +1,5 @@
 
-# TODO after we drop Ubuntu 18.04 (ninja 1.8):
+# TODO after we drop Ubuntu 18.04 and AlmaLinux 8 (ninja 1.8):
 #
 # Unfortunately, ninja versions older than 1.10 don't allow more than one output in dependencies
 # (see https://github.com/ninja-build/ninja/issues/1184). That means we cannot track the `.h` file
@@ -26,7 +26,7 @@ aesm_proto_ch = custom_target('aesm.pb-c.[ch]',
         # check for that is dumb, notably fails when one path is absolute and one is relative, so we
         # have to generate -I and input the same way
         '-I@0@'.format(meson.current_source_dir()),
-        join_paths(meson.current_source_dir(), 'aesm.proto'),
+        meson.current_source_dir() / 'aesm.proto',
     ],
 )
 

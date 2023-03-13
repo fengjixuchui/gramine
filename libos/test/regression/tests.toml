@@ -37,6 +37,7 @@ manifests = [
   "file_size",
   "fopen_cornercases",
   "fork_and_exec",
+  "fork_disallowed",
   "fp_multithread",
   "fstat_cwd",
   "futex_bitset",
@@ -108,6 +109,7 @@ manifests = [
   "syscall",
   "syscall_restart",
   "sysfs_common",
+  "tcp_ancillary",
   "tcp_ipv6_v6only",
   "tcp_msg_peek",
   "toml_parsing",
@@ -120,6 +122,7 @@ manifests = [
 [arch.x86_64]
 
 manifests = [
+  "avx",
   "cpuid",
   "debug_regs_x86_64",
   "rdtsc",

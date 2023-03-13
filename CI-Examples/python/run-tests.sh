@@ -9,7 +9,7 @@ else
     GRAMINE=gramine-direct
 fi
 
-# === hellworld ===
+# === helloworld ===
 echo -e "\n\nRunning helloworld.py:"
 $GRAMINE ./python scripts/helloworld.py > OUTPUT
 grep -q "Hello World" OUTPUT && echo "[ Success 1/4 ]"
@@ -18,7 +18,7 @@ rm OUTPUT
 # === web server and client (on port 8005) ===
 echo -e "\n\nRunning HTTP server dummy-web-server.py in the background:"
 $GRAMINE ./python scripts/dummy-web-server.py 8005 & echo $! > server.PID
-../../scripts/wait_for_server 60 127.0.0.1 8005
+../../scripts/wait_for_server 300 127.0.0.1 8005
 
 echo -e "\n\nRunning HTTP client test-http.py:"
 $GRAMINE ./python scripts/test-http.py 127.0.0.1 8005 > OUTPUT1

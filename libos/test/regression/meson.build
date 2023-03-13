@@ -91,7 +91,7 @@ tests = {
         'include_directories': include_directories(
             # for `libos_entry_api.h`
             '../../include',
-            join_paths('../../include/arch', host_machine.cpu_family()),
+            '../../include/arch' / host_machine.cpu_family(),
         ),
     },
     'sched': {},
@@ -116,7 +116,7 @@ tests = {
         'include_directories': include_directories(
             # for `spinlock.h`
             '../../../common/include',
-            join_paths('../../../common/include/arch', host_machine.cpu_family()),
+            '../../../common/include/arch' / host_machine.cpu_family(),
         ),
     },
     'stat_invalid_args': {},
@@ -124,6 +124,7 @@ tests = {
     'syscall': {},
     'syscall_restart': {},
     'sysfs_common': {},
+    'tcp_ancillary': {},
     'tcp_ipv6_v6only': {},
     'tcp_msg_peek': {},
     'udp': {},
@@ -134,6 +135,9 @@ tests = {
 
 if host_machine.cpu_family() == 'x86_64'
     tests += {
+        'avx': {
+            'c_args': '-mavx',
+        },
         'cpuid': {},
         'debug_regs_x86_64': {
             'c_args': '-g3',
@@ -170,7 +174,7 @@ if sgx
     }
 endif
 
-install_dir = join_paths(pkglibdir, 'tests', 'libos', 'regression')
+install_dir = pkglibdir / 'tests' / 'libos' / 'regression'
 
 configurations = []
 if enable_glibc
@@ -286,7 +290,7 @@ endforeach
 if enable_musl
     meson.add_install_script(
         find_program('install_musl_tests.sh'),
-        prefix / join_paths(install_dir, 'musl'),
+        prefix / install_dir / 'musl',
         musl_execs,
     )
 endif
